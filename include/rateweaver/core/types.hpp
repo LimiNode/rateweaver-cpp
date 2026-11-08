@@ -7,20 +7,15 @@
 #include <utility>
 #include <vector>
 
+#include <time_shield/core/types.hpp>
+
 /// \file types.hpp
 /// \brief Defines fundamental currency, quote, route and conversion types.
 
 namespace rateweaver {
 
-/// \brief Identifies a fiat currency, cryptocurrency or other exchangeable asset.
-///
-/// Currency identifiers are open-ended (e.g. "USD", "USDT", "BTC").
-/// They must be normalized before storage or comparison. No fixed currency
-/// enumeration is imposed by the core domain.
-using CurrencyCode = std::string;
-
-/// \brief Represents a point in time using the system clock.
-using Timestamp = std::chrono::system_clock::time_point;
+/// \brief Unix timestamp in milliseconds since 1970-01-01T00:00:00Z.
+using ts_ms_t = time_shield::ts_ms_t;
 
 /// \brief Describes the origin of an exchange rate.
 ///
@@ -49,9 +44,9 @@ enum class QuoteUsage {
 /// Publication and retrieval timestamps are optional and have different
 /// meanings: the former belongs to the source data, the latter to retrieval.
 struct Quote {
-    CurrencyCode from;                    ///< Base currency (one unit).
-    CurrencyCode to;                      ///< Quote currency (units per base unit).
-    double       rate = 0.0;              ///< Units of `to` per one unit of `from`.
+    std::string  from;                     ///< Base currency (one unit).
+    std::string  to;                       ///< Quote currency (units per base unit).
+    double       rate = 0.0;               ///< Units of `to` per one unit of `from`.
     std::string  source_id;                ///< Provider ID or synthetic source ID.
     QuoteOrigin  origin = QuoteOrigin::Observed; ///< Origin of the rate.
     std::optional<Timestamp> published_at; ///< Publication time reported by the source.
@@ -69,7 +64,7 @@ struct Quote {
     /// \param published_at_ Optional source publication time.
     /// \param retrieved_at_ Optional retrieval time.
     /// \note The constructor does not validate or normalize its arguments.
-    Quote(CurrencyCode from_, CurrencyCode to_, double rate_,
+    Quote(std::string from_, std::string to_, double rate_,
           std::string source_id_ = {},
           QuoteOrigin origin_ = QuoteOrigin::Observed,
           std::optional<Timestamp> published_at_ = std::nullopt,
@@ -83,26 +78,54 @@ struct Quote {
           retrieved_at(retrieved_at_) {}
 };
 
+/// \brief Records an original quote contributing to a conversion step.
+///
+/// The original quote is retained with its source and timestamps. The
+/// effective rate is expressed in the direction of the route step, even when
+/// the original quote was reversed. Individual usage makes it possible to
+/// distinguish fresh inputs from last-known fallback inputs in an aggregate.
+///
+/// \invariant On a successful conversion, `effective_rate` is finite,
+///            strictly positive, and matches `quote.rate` or its reciprocal
+///            according to `reversed`.
+struct QuoteContribution {
+    Quote quote;                ///< Original quote, including provenance.
+    bool reversed = false;     ///< True if the reciprocal direction was used.
+    double effective_rate = 0.0; ///< Rate in the direction of the route step.
+    QuoteUsage usage = QuoteUsage::Normal; ///< How this input was selected.
+};
+
 /// \brief Represents one directed step of a conversion route.
 ///
-/// The step owns a copy of the selected quote, including its source and
-/// timestamps. Therefore, a completed route remains independent of later
-/// updates to the quote storage.
+/// `rate` is the effective rate of the entire step: 1 unit of `from_currency`
+/// is worth `rate` units of `to_currency`. It may be the median, mean or
+/// priority-selected rate of multiple original quotes; it does not have to
+/// equal any single source rate.
+///
+/// Each contributing quote is retained by value for auditability. Therefore,
+/// the step is independent of later updates to quote storage. Rejected quotes
+/// and their exclusion reasons belong to aggregation diagnostics, not here.
+///
+/// \invariant On a successful conversion, currency codes are canonical and
+///            distinct, `rate` is finite and strictly positive, and every
+///            contribution refers to the same effective directed pair.
+/// \note The router is responsible for enforcing these invariants.
 struct RouteStep {
-    Quote quote;                          ///< Selected quote and its metadata.
-    bool reversed = false;               ///< Use the reciprocal of `quote.rate` if true.
-    QuoteUsage usage = QuoteUsage::Normal; ///< Policy under which the quote was selected.
+    std::string from_currency;                ///< Effective source currency.
+    std::string to_currency;                  ///< Effective destination currency.
+    double rate = 0.0;                        ///< Final units of `to` per unit of `from`.
+    std::vector<QuoteContribution> contributors; ///< Quotes used to compute `rate`.
 
-    /// \brief Returns the source currency for this route step.
-    /// \return Reference to the effective source currency identifier.
-    const CurrencyCode& from() const noexcept {
-        return reversed ? quote.to : quote.from;
+    /// \brief Returns the effective source currency of this route step.
+    /// \return Reference to the source currency identifier.
+    const std::string& from() const noexcept {
+        return from_currency;
     }
 
-    /// \brief Returns the destination currency for this route step.
-    /// \return Reference to the effective destination currency identifier.
-    const CurrencyCode& to() const noexcept {
-        return reversed ? quote.from : quote.to;
+    /// \brief Returns the effective destination currency of this route step.
+    /// \return Reference to the destination currency identifier.
+    const std::string& to() const noexcept {
+        return to_currency;
     }
 };
 
@@ -125,7 +148,7 @@ enum class ConversionStatus {
 struct ConversionResult {
     ConversionStatus status = ConversionStatus::NoRoute; ///< Conversion outcome.
     std::optional<double> amount;                       ///< Converted amount on success.
-    std::vector<RouteStep> route;                       ///< Selected route and quote snapshots.
+    std::vector<RouteStep> route;                       ///< Effective route and input evidence.
 
     /// \brief Checks whether the conversion succeeded and produced an amount.
     /// \return True if status is Success and amount contains a value.
