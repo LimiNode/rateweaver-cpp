@@ -49,8 +49,8 @@ struct Quote {
     double       rate = 0.0;               ///< Units of `to` per one unit of `from`.
     std::string  source_id;                ///< Provider ID or synthetic source ID.
     QuoteOrigin  origin = QuoteOrigin::Observed; ///< Origin of the rate.
-    std::optional<Timestamp> published_at; ///< Publication time reported by the source.
-    std::optional<Timestamp> retrieved_at; ///< Time of successful retrieval.
+    std::optional<ts_ms_t> published_at;   ///< Publication time reported by the source.
+    std::optional<ts_ms_t> retrieved_at;   ///< Time of successful retrieval.
 
     /// \brief Constructs an empty quote with default field values.
     Quote() = default;
@@ -67,8 +67,8 @@ struct Quote {
     Quote(std::string from_, std::string to_, double rate_,
           std::string source_id_ = {},
           QuoteOrigin origin_ = QuoteOrigin::Observed,
-          std::optional<Timestamp> published_at_ = std::nullopt,
-          std::optional<Timestamp> retrieved_at_ = std::nullopt)
+          std::optional<ts_ms_t> published_at_ = std::nullopt,
+          std::optional<ts_ms_t> retrieved_at_ = std::nullopt)
         : from(std::move(from_)),
           to(std::move(to_)),
           rate(rate_),
