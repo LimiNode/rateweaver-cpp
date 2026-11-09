@@ -1,9 +1,10 @@
 #pragma once
 
 #include <rateweaver/routing/graph.hpp>
+#include <time_shield/core/time_utils.hpp>
 
 #include <algorithm>
-#include <chrono>
+#include <cstdint>
 #include <cmath>
 #include <cstddef>
 #include <optional>
@@ -44,6 +45,7 @@ enum class QuoteExclusionReason {
     MissingTimestamp,  ///< Freshness was required but no timestamp was available.
     FutureTimestamp,   ///< Quote timestamp exceeds the allowed future skew.
     Stale,             ///< Quote age exceeds the configured maximum.
+    SourceDisabled,    ///< Quote belongs to a caller-disabled source.
     SyntheticDisabled, ///< Synthetic quotes are not enabled by the caller.
     ObservedPreferred, ///< Eligible observed quotes take precedence over synthetic ones.
     DuplicateSource,   ///< Another candidate from the same source was already accepted.
@@ -75,19 +77,19 @@ struct AggregationOptions {
     /// \note std::nullopt disables outlier filtering.
     std::optional<double> max_relative_deviation;
 
-    /// \brief Optional maximum age of a provider quote.
+    /// \brief Optional maximum quote age in milliseconds.
     ///
     /// Uses `published_at` if present, otherwise `retrieved_at`. A missing
     /// timestamp excludes an observed quote when this limit is set.
     /// \note std::nullopt disables freshness filtering, not fallback policy.
-    std::optional<std::chrono::seconds> max_age;
+    std::optional<ts_ms_t> max_age_ms;
 
-    /// \brief Reference time used for freshness checks.
-    /// \note If absent, the aggregator samples system_clock::now() once.
-    std::optional<Timestamp> reference_time;
+    /// \brief Reference Unix timestamp in milliseconds for freshness checks.
+    /// \note If absent, the aggregator samples time_shield::ts_ms() once.
+    std::optional<ts_ms_t> reference_time;
 
-    /// \brief Allowed future clock skew for provider timestamps.
-    std::chrono::seconds max_future_skew{0};
+    /// \brief Allowed future clock skew in milliseconds for quote timestamps.
+    ts_ms_t max_future_skew_ms = 0;
 
     /// \brief Allow synthetic rates only when no eligible observed rate exists.
     ///
@@ -99,6 +101,12 @@ struct AggregationOptions {
     /// \brief Source IDs in descending order of preference for Priority.
     /// \note Unlisted sources follow listed sources, ordered by source ID.
     std::vector<std::string> source_priority;
+
+    /// \brief IDs of sources excluded from all aggregation strategies.
+    /// \note An empty set (the default) allows every source. Comparison is
+    ///       exact and case-sensitive. Disabled quotes remain in QuoteGraph
+    ///       and are still recorded in aggregation diagnostics.
+    std::set<std::string> disabled_sources;
 };
 
 /// \brief Captures one candidate and its aggregation decision.
@@ -171,8 +179,8 @@ public:
         const auto edges = graph.edges_between(pair.from, pair.to);
         if (edges.empty()) return result;
 
-        const Timestamp now = options.reference_time
-            ? *options.reference_time : std::chrono::system_clock::now();
+        const ts_ms_t now = options.reference_time
+            ? *options.reference_time : time_shield::ts_ms();
         std::vector<std::size_t> observed;
         std::vector<std::size_t> synthetic;
         std::set<std::string> observed_sources;
@@ -183,6 +191,12 @@ public:
             AggregationSample sample;
             sample.edge = edge;
             const std::size_t index = result.samples.size();
+
+            if (options.disabled_sources.count(edge.quote.source_id) != 0) {
+                sample.exclusion = QuoteExclusionReason::SourceDisabled;
+                result.samples.push_back(std::move(sample));
+                continue;
+            }
 
             const double effective = edge.reversed ? 1.0 / edge.quote.rate
                                                    : edge.quote.rate;
@@ -293,8 +307,8 @@ public:
 
 private:
     static bool valid_options(const AggregationOptions& options) noexcept {
-        if (options.min_sources == 0 || options.max_future_skew.count() < 0 ||
-            (options.max_age && options.max_age->count() < 0) ||
+        if (options.min_sources == 0 || options.max_future_skew_ms < 0 ||
+            (options.max_age_ms && *options.max_age_ms < 0) ||
             (options.max_relative_deviation &&
              (!std::isfinite(*options.max_relative_deviation) ||
               *options.max_relative_deviation < 0.0))) {
@@ -317,22 +331,29 @@ private:
                 return false;
             }
         }
+        if (options.disabled_sources.count("") != 0) return false;
         return true;
     }
 
     static QuoteExclusionReason freshness_status(const Quote& quote,
                                                  const AggregationOptions& options,
-                                                 Timestamp now) noexcept {
-        if (!options.max_age) return QuoteExclusionReason::None;
+                                                 ts_ms_t now) noexcept {
+        if (!options.max_age_ms) return QuoteExclusionReason::None;
         const auto timestamp = quote.published_at ? quote.published_at
                                                   : quote.retrieved_at;
         if (!timestamp) return QuoteExclusionReason::MissingTimestamp;
+
+        // Unsigned differences avoid signed overflow at timestamp extremes.
         if (*timestamp > now) {
-            return (*timestamp - now) > options.max_future_skew
+            const auto lead_ms = static_cast<std::uint64_t>(*timestamp) -
+                                 static_cast<std::uint64_t>(now);
+            return lead_ms > static_cast<std::uint64_t>(options.max_future_skew_ms)
                        ? QuoteExclusionReason::FutureTimestamp
                        : QuoteExclusionReason::None;
         }
-        return (now - *timestamp) > *options.max_age
+        const auto age_ms = static_cast<std::uint64_t>(now) -
+                            static_cast<std::uint64_t>(*timestamp);
+        return age_ms > static_cast<std::uint64_t>(*options.max_age_ms)
                    ? QuoteExclusionReason::Stale
                    : QuoteExclusionReason::None;
     }
