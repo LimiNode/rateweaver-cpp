@@ -26,7 +26,7 @@ inline constexpr bool is_ascii_space_or_control(unsigned char ch) noexcept {
 ///         lowercase letters converted to uppercase.
 /// \note Non-ASCII bytes and internal characters are preserved. This function
 ///       does not validate identifiers or resolve aliases (e.g. USD and USDT).
-inline CurrencyCode normalize_currency_code(std::string_view code) {
+inline std::string normalize_currency_code(std::string_view code) {
     while (!code.empty() && detail::is_ascii_space_or_control(
                                 static_cast<unsigned char>(code.front()))) {
         code.remove_prefix(1);
@@ -36,7 +36,7 @@ inline CurrencyCode normalize_currency_code(std::string_view code) {
         code.remove_suffix(1);
     }
 
-    CurrencyCode result;
+    std::string result;
     result.reserve(code.size());
     for (char ch : code) {
         if (ch >= 'a' && ch <= 'z') {
@@ -68,8 +68,8 @@ inline bool is_valid_currency_code(std::string_view code) noexcept {
 /// \brief Identifies a directed currency pair without an exchange rate.
 /// \note Both identifiers must be normalized before the pair is used as a key.
 struct CurrencyPair {
-    CurrencyCode from; ///< Base currency identifier.
-    CurrencyCode to;   ///< Quote currency identifier.
+    std::string from; ///< Base currency identifier.
+    std::string to;   ///< Quote currency identifier.
 };
 
 /// \brief Compares two directed currency pairs for equality.
