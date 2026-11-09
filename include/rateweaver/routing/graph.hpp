@@ -41,13 +41,13 @@ struct GraphEdge {
 
     /// \brief Returns the effective source currency of this edge.
     /// \return Reference to the canonical source currency identifier.
-    const CurrencyCode& from() const noexcept {
+    const std::string& from() const noexcept {
         return reversed ? quote.to : quote.from;
     }
 
     /// \brief Returns the effective destination currency of this edge.
     /// \return Reference to the canonical destination currency identifier.
-    const CurrencyCode& to() const noexcept {
+    const std::string& to() const noexcept {
         return reversed ? quote.from : quote.to;
     }
 };
@@ -104,7 +104,7 @@ public:
     /// \brief Checks whether a currency appears in the graph.
     /// \param currency Canonical currency identifier.
     /// \return True if at least one original quote references the currency.
-    bool has_currency(const CurrencyCode& currency) const noexcept {
+    bool has_currency(const std::string& currency) const noexcept {
         return m_currencies.find(currency) != m_currencies.end();
     }
 
@@ -113,7 +113,7 @@ public:
     /// \return Owned-by-graph edges, or a reference to an empty list.
     /// \note The reference is valid only while the graph is alive.
     ///       Edges are ordered by destination, source ID and direction.
-    const EdgeList& outgoing(const CurrencyCode& currency) const noexcept {
+    const EdgeList& outgoing(const std::string& currency) const noexcept {
         const auto it = m_adjacency.find(currency);
         return it == m_adjacency.end() ? empty_edges() : it->second;
     }
@@ -125,8 +125,8 @@ public:
     /// \note Both direct and derived reciprocal candidates can be returned.
     ///       Before computing a median, an aggregation policy must account
     ///       for source independence, origin, timestamps and freshness.
-    EdgeList edges_between(const CurrencyCode& from,
-                           const CurrencyCode& to) const {
+    EdgeList edges_between(const std::string& from,
+                           const std::string& to) const {
         EdgeList result;
         for (const auto& edge : outgoing(from)) {
             if (edge.to() == to) result.push_back(edge);
@@ -135,8 +135,8 @@ public:
     }
 
 private:
-    using SourcePairKey = std::tuple<std::string, CurrencyCode, CurrencyCode>;
-    using Adjacency = std::map<CurrencyCode, EdgeList>;
+    using SourcePairKey = std::tuple<std::string, std::string, std::string>;
+    using Adjacency = std::map<std::string, EdgeList>;
 
     QuoteGraph(const std::vector<Quote>& quotes,
                std::uint64_t revision,
@@ -194,7 +194,7 @@ private:
     std::uint64_t m_revision = 0;
     std::size_t m_quote_count = 0;
     std::size_t m_edge_count = 0;
-    std::set<CurrencyCode> m_currencies;
+    std::set<std::string> m_currencies;
     Adjacency m_adjacency;
 };
 
