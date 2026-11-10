@@ -19,19 +19,10 @@ namespace rateweaver {
 
 /// \brief Configures route discovery and per-hop exchange-rate aggregation.
 struct RouterOptions {
-    /// \brief Maximum number of conversion steps in an automatic or explicit route.
-    std::size_t max_hops = 4;
-
-    /// \brief Maximum number of partial routes examined by automatic search.
-    /// \note Reaching the limit returns PolicyRejected; increase this limit
-    ///       if a dense graph requires more exhaustive route discovery.
-    std::size_t max_search_states = 10000;
-
-    /// \brief Controls how independent quotes are combined at each hop.
-    AggregationOptions aggregation;
-
-    /// \brief Optional bounded last-known fallback after normal aggregation fails.
-    QuotePolicyOptions quote_policy;
+    std::size_t max_hops = 4; ///< Maximum number of conversion steps in an automatic or explicit route.
+    std::size_t max_search_states = 10000; ///< Maximum number of partial routes examined by automatic search. Reaching the limit returns PolicyRejected; increase this limit if a dense graph requires more exhaustive route discovery.
+    AggregationOptions aggregation;  ///< Controls how independent quotes are combined at each hop.
+    QuotePolicyOptions quote_policy; ///< Optional bounded last-known fallback after normal aggregation fails. 
 };
 
 /// \brief Converts amounts along graph routes using aggregate rates.
