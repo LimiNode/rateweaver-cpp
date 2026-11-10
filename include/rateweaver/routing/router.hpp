@@ -29,13 +29,16 @@ struct RouterOptions {
 
     /// \brief Controls how independent quotes are combined at each hop.
     AggregationOptions aggregation;
+
+    /// \brief Optional bounded last-known fallback after normal aggregation fails.
+    QuotePolicyOptions quote_policy;
 };
 
 /// \brief Converts amounts along graph routes using aggregate rates.
 ///
 /// The router does not mutate the graph and owns no quote data. Each hop
-/// is evaluated with RateAggregator, including source exclusions, freshness
-/// and outlier policies. Successful RouteStep values preserve contributing
+/// is evaluated with QuotePolicy and RateAggregator, including source exclusions,
+/// freshness, bounded last-known fallback and outlier policies. Successful RouteStep values preserve contributing
 /// quotes and effective rates for auditability.
 ///
 /// Automatic routing searches simple paths in increasing hop count. Ties are
@@ -45,7 +48,7 @@ struct RouterOptions {
 ///
 /// \note Routing results depend on the supplied immutable graph and options.
 ///       Without an explicit aggregation.reference_time, freshness is evaluated
-///       against the clock during aggregation.
+///       against a single timestamp captured at the start of conversion.
 class RateRouter final {
 public:
     /// \brief Creates a router referencing an existing immutable graph.
@@ -85,7 +88,7 @@ public:
         // A single reference time makes freshness decisions consistent across
         // all candidate routes in this conversion call.
         const auto aggregation = fixed_time_aggregation();
-        std::map<std::pair<std::string, std::string>, AggregationResult> cache;
+        std::map<std::pair<std::string, std::string>, QuotePolicyResult> cache;
         bool rejected = false;
         bool arithmetic_error = false;
         std::size_t examined = 0;
@@ -122,7 +125,7 @@ public:
                     continue;
                 }
 
-                const auto converted = multiply(current.amount, *aggregate.rate);
+                const auto converted = multiply(current.amount, *aggregate.aggregation.rate);
                 if (!converted) {
                     arithmetic_error = true;
                     continue;
@@ -200,14 +203,14 @@ public:
         std::vector<RouteStep> steps;
         steps.reserve(route.size() - 1);
         for (std::size_t i = 1; i < route.size(); ++i) {
-            const auto aggregate = RateAggregator::aggregate(
-                m_graph, route[i - 1], route[i], aggregation);
+            const auto aggregate = QuotePolicy::select(
+                m_graph, route[i - 1], route[i], aggregation, m_options.quote_policy);
             if (!aggregate) {
-                result.status = aggregate.status == AggregationStatus::NoQuotes
+                result.status = aggregate.aggregation.status == AggregationStatus::NoQuotes
                     ? ConversionStatus::NoRoute : ConversionStatus::PolicyRejected;
                 return result;
             }
-            const auto converted = multiply(value, *aggregate.rate);
+            const auto converted = multiply(value, *aggregate.aggregation.rate);
             if (!converted) {
                 result.status = ConversionStatus::ArithmeticError;
                 return result;
@@ -238,14 +241,15 @@ private:
         return options;
     }
 
-    const AggregationResult& aggregate_hop(
-        std::map<std::pair<std::string, std::string>, AggregationResult>& cache,
+    const QuotePolicyResult& aggregate_hop(
+        std::map<std::pair<std::string, std::string>, QuotePolicyResult>& cache,
         const AggregationOptions& options, const std::string& from,
         const std::string& to) const {
         const auto key = std::make_pair(from, to);
         auto it = cache.find(key);
         if (it == cache.end()) {
-            it = cache.emplace(key, RateAggregator::aggregate(m_graph, from, to, options)).first;
+            it = cache.emplace(key, QuotePolicy::select(m_graph, from, to, options,
+                                                         m_options.quote_policy)).first;
         }
         return it->second;
     }
@@ -260,18 +264,19 @@ private:
     }
 
     static RouteStep make_step(const std::string& from, const std::string& to,
-                               const AggregationResult& aggregate) {
+                               const QuotePolicyResult& selected) {
         RouteStep step;
         step.from_currency = from;
         step.to_currency = to;
-        step.rate = *aggregate.rate;
-        for (const auto& sample : aggregate.samples) {
+        step.rate = *selected.aggregation.rate;
+        for (std::size_t i = 0; i < selected.aggregation.samples.size(); ++i) {
+            const auto& sample = selected.aggregation.samples[i];
             if (!sample.contributed) continue;
             QuoteContribution contribution;
             contribution.quote = sample.edge.quote;
             contribution.reversed = sample.edge.reversed;
             contribution.effective_rate = *sample.rate;
-            contribution.usage = QuoteUsage::Normal;
+            contribution.usage = selected.usage[i];
             step.contributors.push_back(std::move(contribution));
         }
         return step;
@@ -280,5 +285,8 @@ private:
     const QuoteGraph& m_graph;
     RouterOptions m_options;
 };
+
+} // namespace rateweaver
+
 
 } // namespace rateweaver
