@@ -1,5 +1,7 @@
 #pragma once
 
+#include <rateweaver/policies/quote_policy.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -20,7 +22,7 @@ namespace rateweaver {
 /// \brief Configures route discovery and per-hop exchange-rate aggregation.
 struct RouterOptions {
     std::size_t max_hops = 4; ///< Maximum number of conversion steps in an automatic or explicit route.
-    std::size_t max_search_states = 10000; ///< Maximum number of partial routes examined by automatic search. Reaching the limit returns PolicyRejected; increase this limit if a dense graph requires more exhaustive route discovery.
+    std::size_t max_search_states = 10000; ///< Maximum partial routes considered, including the root and rejected extensions. Bounds queue growth and hop evaluations; exhaustion returns PolicyRejected.
     AggregationOptions aggregation;  ///< Controls how independent quotes are combined at each hop.
     QuotePolicyOptions quote_policy; ///< Optional bounded last-known fallback after normal aggregation fails. 
 };
@@ -82,34 +84,32 @@ public:
         std::map<std::pair<std::string, std::string>, QuotePolicyResult> cache;
         bool rejected = false;
         bool arithmetic_error = false;
-        std::size_t examined = 0;
+        std::size_t examined = 1;
         std::deque<Path> queue;
         queue.push_back(Path{{source}, amount, {}});
 
         while (!queue.empty()) {
-            if (examined >= m_options.max_search_states) {
-                result.status = ConversionStatus::PolicyRejected;
-                return result;
-            }
             Path current = std::move(queue.front());
             queue.pop_front();
-            ++examined;
 
             const auto& node = current.currencies.back();
             if (current.steps.size() >= m_options.max_hops) continue;
 
-            // QuoteGraph::outgoing() is sorted by destination/source; the set
-            // prevents multiple source quotes from expanding the same hop.
-            std::set<std::string> next_currencies;
+            // Sorted destinations need no auxiliary candidate set. Count every
+            // extension before evaluating it, including rejected candidates,
+            // so a broad first layer cannot allocate an unbounded path queue.
+            std::string previous;
             for (const auto& edge : m_graph.outgoing(node)) {
                 const auto& next = edge.to();
-                if (std::find(current.currencies.begin(),
-                              current.currencies.end(), next) == current.currencies.end()) {
-                    next_currencies.insert(next);
+                if (next == previous) continue;
+                previous = next;
+                if (std::find(current.currencies.begin(), current.currencies.end(), next) !=
+                    current.currencies.end()) continue;
+                if (examined >= m_options.max_search_states) {
+                    result.status = ConversionStatus::PolicyRejected;
+                    return result;
                 }
-            }
-
-            for (const auto& next : next_currencies) {
+                ++examined;
                 const auto& aggregate = aggregate_hop(cache, aggregation, node, next);
                 if (!aggregate) {
                     rejected = true;
@@ -228,7 +228,7 @@ private:
 
     AggregationOptions fixed_time_aggregation() const {
         AggregationOptions options = m_options.aggregation;
-        if (!options.reference_time) options.reference_time = time_shield::ts_ms();
+        if (!options.reference_time) options.reference_time = current_time_ms();
         return options;
     }
 
@@ -276,8 +276,5 @@ private:
     const QuoteGraph& m_graph;
     RouterOptions m_options;
 };
-
-} // namespace rateweaver
-
 
 } // namespace rateweaver

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <rateweaver/routing/graph.hpp>
-#include <time_shield/core/time_utils.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -85,7 +84,7 @@ struct AggregationOptions {
     std::optional<ts_ms_t> max_age_ms;
 
     /// \brief Reference Unix timestamp in milliseconds for freshness checks.
-    /// \note If absent, the aggregator samples time_shield::ts_ms() once.
+    /// \note If absent, the aggregator samples current_time_ms() once.
     std::optional<ts_ms_t> reference_time;
 
     /// \brief Allowed future clock skew in milliseconds for quote timestamps.
@@ -180,7 +179,7 @@ public:
         if (edges.empty()) return result;
 
         const ts_ms_t now = options.reference_time
-            ? *options.reference_time : time_shield::ts_ms();
+            ? *options.reference_time : current_time_ms();
         std::vector<std::size_t> observed;
         std::vector<std::size_t> synthetic;
         std::set<std::string> observed_sources;
@@ -338,10 +337,12 @@ private:
     static QuoteExclusionReason freshness_status(const Quote& quote,
                                                  const AggregationOptions& options,
                                                  ts_ms_t now) noexcept {
-        if (!options.max_age_ms) return QuoteExclusionReason::None;
         const auto timestamp = quote.published_at ? quote.published_at
                                                   : quote.retrieved_at;
-        if (!timestamp) return QuoteExclusionReason::MissingTimestamp;
+        if (!timestamp) {
+            return options.max_age_ms ? QuoteExclusionReason::MissingTimestamp
+                                      : QuoteExclusionReason::None;
+        }
 
         // Unsigned differences avoid signed overflow at timestamp extremes.
         if (*timestamp > now) {
@@ -351,6 +352,7 @@ private:
                        ? QuoteExclusionReason::FutureTimestamp
                        : QuoteExclusionReason::None;
         }
+        if (!options.max_age_ms) return QuoteExclusionReason::None;
         const auto age_ms = static_cast<std::uint64_t>(now) -
                             static_cast<std::uint64_t>(*timestamp);
         return age_ms > static_cast<std::uint64_t>(*options.max_age_ms)

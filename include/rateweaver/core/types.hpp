@@ -2,12 +2,11 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <time_shield/core/types.hpp>
 
 /// \file types.hpp
 /// \brief Defines fundamental currency, quote, route and conversion types.
@@ -15,7 +14,14 @@
 namespace rateweaver {
 
 /// \brief Unix timestamp in milliseconds since 1970-01-01T00:00:00Z.
-using ts_ms_t = time_shield::ts_ms_t;
+using ts_ms_t = std::int64_t;
+
+/// \brief Returns the system clock's Unix timestamp in milliseconds.
+/// \note Supply a reference timestamp explicitly for reproducible valuation.
+inline ts_ms_t current_time_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
 
 /// \brief Describes the origin of an exchange rate.
 ///

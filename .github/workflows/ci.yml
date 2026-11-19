@@ -1,0 +1,50 @@
+name: C++17 package
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            generator: Unix Makefiles
+          - os: windows-latest
+            generator: Visual Studio 17 2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Release core
+        run: cmake -S . -B tmp/agent-work/ci -G "${{ matrix.generator }}" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_BUILD_EXAMPLES=ON
+      - name: Build public headers and tests
+        run: cmake --build tmp/agent-work/ci --config Release --parallel 2
+      - name: Test core, install and superproject consumers
+        run: ctest --test-dir tmp/agent-work/ci -C Release --output-on-failure
+
+  providers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install optional parser dependencies
+        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev libpugixml-dev
+      - name: Configure Release providers
+        run: cmake -S . -B tmp/agent-work/ci -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON
+      - name: Build and test offline providers
+        run: cmake --build tmp/agent-work/ci --parallel 2 && ctest --test-dir tmp/agent-work/ci --output-on-failure
+
+  mingw:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-nlohmann-json mingw-w64-x86_64-pugixml
+      - name: Configure Release
+        run: cmake -S . -B tmp/agent-work/ci -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON
+      - name: Build and test
+        run: cmake --build tmp/agent-work/ci --parallel 2 && ctest --test-dir tmp/agent-work/ci --output-on-failure
