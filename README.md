@@ -1,84 +1,148 @@
 # RateWeaver
 
-**RateWeaver** is a C++17 library for collecting, aggregating, and converting fiat and cryptocurrency exchange rates. Its design supports multi-source quotations, graph-based conversion routes, and configurable data-quality and fallback policies.
+RateWeaver is a C++17 header-only library for currency conversion using
+attributed exchange-rate observations. Core storage, immutable graphs,
+aggregation, quote policy, routing and optional feed adapters have separate
+responsibilities. These are valuation inputs, not broker tick streams or
+execution prices.
 
-> **Status:** Early development. This README describes the intended public contract; the API and providers are not implemented yet.
+This is a pre-release foundation. See the [implementation inventory](docs/implementation-inventory.md),
+[integration guide](docs/integration.md), [provider lifecycle](docs/providers.md)
+and [validation report](docs/validation.md) for contracts and observed checks.
 
-## Design goals
+## Conversion
 
-- **Currency identifiers are strings.** Use normalized codes such as `USD`, `EUR`, `RUB`, `BTC`, and `USDT`. Adding a currency must not require recompiling an enum definition.
-- **No privileged base currency.** Quotes represent directed currency pairs. A conversion can use a direct quote or a route through intermediate currencies.
-- **Multiple data sources.** Keep transport, response parsing, normalization, and quote storage separate. Initial adapters are planned for the ECB, CBR, and CDN exchange-rate feeds.
-- **Explicit data quality.** Preserve the source, publication time (when available), retrieval time, and freshness/status of a quote. A successful HTTP response does not automatically mean a successful data update.
-- **Configurable selection.** Support currency filters, source priorities, aggregation policies, and limits on route length and quote age.
-- **Controlled fallbacks.** Support last-known quotes and configurable synthetic rates (for example, `USD -> USDT` at `1.0`) without representing them as live market observations.
-- **Portable and independently usable.** Do not depend on MegaConnector classes, logging macros, Windows-specific APIs, or a mandatory background thread.
+```cpp
+#include <rateweaver.hpp>
 
-## Quote and conversion semantics
-
-A directed quote `(from, to, rate)` means:
-
-```text
-1 unit of from = rate units of to
+// Fictional offline observation, not a current market rate.
+rateweaver::Quote quote;
+quote.from = "EUR";
+quote.to = "USD";
+quote.rate = 1.25; // 1 EUR = 1.25 USD.
+quote.source_id = "offline-demonstration";
+quote.origin = rateweaver::QuoteOrigin::Observed;
+quote.published_at = 1700000000000LL;
+quote.effective_at = 1700000000000LL;
+quote.retrieved_at = 1700000000100LL;
+const rateweaver::QuoteGraph graph(std::vector<rateweaver::Quote>{quote});
+rateweaver::RouterOptions options;
+options.aggregation.reference_time = 1700000000200LL;
+options.aggregation.max_age_ms = 1000; // Illustrative fixture window: one second.
+const auto result = rateweaver::RateRouter(graph, options).convert(10.0, "EUR", "USD");
+if (result) {
+    // *result.amount == 12.5; result.route owns the contributing quote evidence.
+} else {
+    // Report result.status. No converted amount is available.
+}
 ```
 
-Rates must be finite and strictly positive. A reciprocal direction may be derived when permitted by policy. A conversion amount may be zero or negative (for example, when converting P&L); it must be finite. A conversion failure must be distinguishable from the valid numeric result `0`.
+The [complete example](examples/convert.cpp) explains all fields and the
+fixture's clock choices. A daily feed needs its own freshness policy; the
+one-second window above is not a production recommendation.
 
-Conversion results should expose the computed amount, the selected route, and enough provenance/status information to tell whether live, cached, or synthetic data were used.
+Rates must be finite and positive. Finite amounts may be zero or negative;
+unavailable conversion differs from a valid zero. Known identical currencies
+need no quote. Normalization trims surrounding ASCII whitespace (space and
+tab through carriage return) and uppercases ASCII letters. Other control bytes
+are preserved and rejected by validation. Canonical identifiers match
+`[A-Z0-9][A-Z0-9_.:-]{0,31}`; this is not an ISO whitelist or alias resolution.
+`USD` and `USDT` are different identifiers.
 
-Automatic routing must be deterministic, avoid cycles, and enforce a configurable hop limit. A route with the numerically largest rate is **not** automatically the best route: source quality and quote age must be taken into account. Explicit routes should be supported as well.
+`QuoteBook::replace_source()` atomically replaces a complete source batch.
+Rejected batches preserve data and revision. An explicit empty batch removes a
+source; provider errors must not become empty success. Owned snapshots and
+graphs remain valid after updates. Core owns the canonical `QuoteGraph` and
+derives reciprocals unless that source supplies an explicit reverse quote.
 
-## Fallback policy
+Routes are deterministic shortest acceptable simple paths with lexicographic
+ties, hop and search-work bounds. They do not maximize the numerical rate.
+Median, mean and priority aggregation retain source evidence. Distinct IDs
+prevent duplicate voting but do not establish independent upstream sources.
+`NoConsensus` is a final refusal; LastKnown cannot add stale votes to repair it.
+Synthetic assumptions are opt-in and never enter an observed-rate median.
 
-A quote can be used from one of several clearly identified origins:
+## Time, freshness and precision
 
-- **Observed:** supplied by an external provider and accepted by validation.
-- **Cached:** a previously observed quote retained according to a maximum-age policy.
-- **Synthetic:** an explicitly configured assumed rate, such as a `1:1` peg.
+Core requires Time Shield 2.0. `ts_ms_t` aliases `time_shield::ts_ms_t`;
+`current_time_ms()` uses UTC `ts_ms()`, and refresh cadence uses
+`monotonic_time_ms()`/`monotonic_ms()`. Wall-clock adjustments do not schedule
+refreshes. Explicit injected clocks keep tests deterministic.
 
-Synthetic values and stale quotes must never be silently presented as fresh observations. Their availability and precedence are configurable. In particular, a `USD/USDT = 1` assumption is not a guaranteed market price.
+Publication time, effective time and successful retrieval time are separate.
+The daily adapters put source calendar dates in `effective_at`; they do not
+claim a precise publication instant. Freshness uses `published_at`, otherwise
+`effective_at`, otherwise `retrieved_at`. Future effective rates are unavailable
+for current valuation, including explicit synthetic assumptions, even with
+allowed publication-clock skew or a disabled age limit. An age limit
+rejects observed quotes with no timestamp. Leaving `max_age_ms` unset disables
+that limit; financial consumers must choose it explicitly.
 
-## Planned architecture
+`Observed` means source provenance, not accuracy or freshness. A bounded opt-in
+`LastKnownFallback` retains that origin. `Synthetic` marks an explicit assumption;
+no parity is invented. Inspect route contributions before presenting cached or
+synthetic valuations. `RateRouter::diagnose_pair()` exposes direct-pair policy
+status and exclusions without expanding every conversion result.
 
-```text
-include/
-  rateweaver.hpp                  # Public umbrella header
-  rateweaver/
-    rateweaver.hpp                # Library umbrella header
-    core/                         # Currency identifiers, quotes, results, errors
-    providers/                    # ECB, CBR, CDN, custom providers
-    routing/                      # Conversion graph and route selection
-    aggregation/                  # Multi-provider quote combination
-    policies/                     # Filtering, freshness, fallback, precedence
-    runtime/                      # HTTP transport, refresh and lifecycle
-external/                         # Third-party dependencies
-examples/
-tests/
-cmake/
-CMakeLists.txt
+The current book has no historical lookup. `reference_time` checks supplied
+quotes; today's daily rate cannot establish a past trade's valuation. Missing
+historical evidence means unavailable. Convert separately known currency
+components before aggregating. Binary `double` is not decimal money: the host
+owns accounting precision, minor-unit and rounding rules.
+
+## Build and install
+
+Use CMake 3.21 or newer and a C++17 compiler.
+
+Direct dependencies are pinned submodules; see [the dependency registry](docs/dependencies.md).
+Use their recorded commits, never `git submodule update --remote`:
+
+```sh
+git submodule update --init
+cmake -S . -B build-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_BUILD_EXAMPLES=ON
+cmake --build build-mingw
+ctest --test-dir build-mingw -C Release --output-on-failure
+cmake --install build-mingw --prefix /path/to/rateweaver-prefix
 ```
 
-Each domain will expose its own umbrella header. The core models and conversion logic should not require network access.
+Linux can omit the generator or use `Unix Makefiles`. MSVC uses
+`-G "Visual Studio 17 2022" -A x64` and `--config Release` for build/install.
+Core needs Time Shield and platform threads; it needs no HTTP/JSON/XML runtime.
+Bundled mode is the top-level default; existing-dependency mode is the embedded
+default. Existing compatible targets always take precedence. Neither mode
+starts an HTTP runtime. The [integration guide](docs/integration.md) documents
+embedded and installed use.
 
-## Dependencies (planned)
+```cmake
+find_package(rateweaver 0.1 CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE rateweaver::rateweaver)
+```
 
-| Dependency | Purpose |
-|---|---|
-| [kurlyk](https://github.com/NewYaroslav/kurlyk) | HTTP requests |
-| [nlohmann/json](https://github.com/nlohmann/json) | Parsing JSON-based providers |
-| [pugixml](https://github.com/zeux/pugixml) | Parsing the ECB daily XML feed (ECB adapter only) |
+Optional features remain explicit:
 
-The ECB adapter is planned to keep using the official daily XML feed instead of introducing SDMX-JSON parsing solely to eliminate `pugixml`. It should be optional. The C++ standard library's `<chrono>` facilities should be sufficient initially; `time-shield-cpp` is not a required dependency.
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `RATEWEAVER_DEPENDENCY_MODE` | `BUNDLED` standalone; `EXISTING` embedded | Pinned submodules or host targets/packages |
+| `RATEWEAVER_CURL_MODE` | `AUTO` | Existing/system CURL, or pinned bundled fallback |
+| `RATEWEAVER_BUILD_TESTS` | On standalone; off embedded | Release-active offline and package/consumer regressions |
+| `RATEWEAVER_BUILD_EXAMPLES` | Off | Conversion and, when enabled, provider-refresh example |
+| `RATEWEAVER_BUILD_PROVIDERS` | Off | CDN/CBR JSON adapters; `rateweaver::providers` |
+| `RATEWEAVER_ENABLE_ECB` | Off | ECB XML adapter; `rateweaver::ecb` |
+| `RATEWEAVER_ENABLE_KURLYK` | Off | Native async refresh; `rateweaver::kurlyk` |
+| `RATEWEAVER_BUILD_LIVE_SMOKE` | Off | Diagnostic HTTPS smoke against public feeds |
+| `RATEWEAVER_INSTALL` | On | Headers and exported CMake package |
 
-The target integration is **header-only C++17**, including an INTERFACE CMake target. Dependency build modes and optional provider switches will be documented once implemented.
+Enable JSON, ECB and kurlyk options for the complete provider configuration.
+The [persistent-client example](examples/provider_refresh.cpp) submits repeated
+async updates through one client. The separate [live smoke](examples/live_providers.cpp)
+reports provider availability and provenance; mandatory tests use loopback HTTP
+and offline fixtures.
 
-## Initial implementation sequence
+kurlyk v1.1.1 fixes the old group-count handoff defect. Its body is still buffered
+before streaming notification, and native cancellation still waits. Consequently
+`max_body_bytes` is an acceptance limit, not a hard receive-memory ceiling. See
+the [version-specific audit](docs/kurlyk-limitations.md) before relying on stronger
+resource/cancellation guarantees.
 
-1. Core types, invariants, validation, and status/result model.
-2. Quote store and a deterministic conversion router (direct, reciprocal, multi-hop, explicit routes).
-3. Currency filters, synthetic rates, cache/freshness policy, and aggregation.
-4. Transport abstraction and provider adapters (CDN, CBR, ECB).
-5. Refresh orchestration, tests, examples, and packaging.
-
-Until the first usable release, API examples and feature guarantees will be added only when verified by tests.
-
+Develop in a dedicated branch/worktree under `.worktree/<task-name>/`; temporary
+artifacts belong in `tmp/agent-work/`. Follow [AGENTS.md](AGENTS.md).

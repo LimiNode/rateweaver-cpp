@@ -1,6 +1,6 @@
 #pragma once
 
-#include "quote_book.hpp"
+#include <rateweaver/core/quote_book.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -49,9 +49,9 @@ struct GraphEdge {
 /// Every source quote remains a separate candidate edge. Parallel edges
 /// allow later aggregation (including median) without losing provenance.
 /// The graph never averages, filters by age, selects or prioritizes sources.
-/// A reciprocal edge is added automatically for a source that does not
-/// provide an explicit reverse quote. It is derived from the same observation
-/// and never treated as another independent source.
+/// It also never treats an inferred reciprocal as another independent quote.
+/// Every source quote supplies a reciprocal edge unless that source provides
+/// the reverse direction explicitly; the explicit observation takes precedence.
 ///
 /// Construction validates the input and throws std::invalid_argument for
 /// malformed quotes or duplicate (source, directed pair) entries. Once built,
@@ -128,8 +128,7 @@ private:
     using SourcePairKey = std::tuple<std::string, std::string, std::string>;
     using Adjacency = std::map<std::string, EdgeList>;
 
-    QuoteGraph(const std::vector<Quote>& quotes,
-               std::uint64_t revision)
+    QuoteGraph(const std::vector<Quote>& quotes, std::uint64_t revision)
         : m_revision(revision), m_quote_count(quotes.size()) {
         std::set<SourcePairKey> available;
         for (const auto& quote : quotes) {
@@ -151,7 +150,7 @@ private:
             // Prefer the provider's explicit reverse quote when it exists.
             // This also avoids counting a source twice for the same direction.
             if (available.find(SourcePairKey{quote.source_id, quote.to, quote.from}) ==
-                available.end()) {
+                    available.end()) {
                 add_edge(quote, true);
             }
         }
