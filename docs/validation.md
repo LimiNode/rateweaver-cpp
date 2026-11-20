@@ -9,9 +9,9 @@ is included. Results below are from the corrected source, not the starting HEAD.
 
 | Toolchain | Full CTest (including opt-in live) | Native owned limiter, 3 refreshes / 500 ms period |
 | --- | --- | --- |
-| MinGW GCC 15.2.0 | 9/9 passed, 49.99 s | 1058 ms |
-| MSVC 19.44.35228 | 9/9 passed, 42.19 s | 1050 ms |
-| Linux GCC 15.2.0 (Ubuntu/WSL) | 9/9 passed, 77.91 s | 1003 ms |
+| MinGW GCC 15.2.0 | 9/9 passed, 47.32 s | 1063 ms |
+| MSVC 19.44.35228 | 9/9 passed, 40.32 s | 1066 ms |
+| Linux GCC 15.2.0 (Ubuntu/WSL) | 9/9 passed, 77.22 s | 1005 ms |
 
 The full configuration builds JSON, ECB, native kurlyk and live examples in
 Release. All 19 public headers compile individually as the first/only include
@@ -19,6 +19,12 @@ of their translation units. Multi-TU linkage, standalone and embedded builds,
 relocated installed core and optional JSON/XML/kurlyk consumers pass. The core
 consumer disables JSON, XML, kurlyk and CURL discovery and remains usable.
 An additional MinGW ECB-only profile passes 6/6 with JSON/HTTP discovery disabled.
+
+The optional installed consumer preserves external dependency prefixes, including
+transitive CURL dependencies from vcpkg. A local reproducer with two prefixes
+(one containing a space) failed dependency discovery before the correction and
+passed afterward. The prefix list crosses the subprocess boundary in an initial
+cache file; the independent core consumer does not inherit those dependencies.
 
 Core has 168 Release-active checks; parser fixtures have 66. The native loopback
 suite's check count varies with its control-poll scheduling; manual kurlyk

@@ -38,9 +38,14 @@ else()
         -DCMAKE_DISABLE_FIND_PACKAGE_nlohmann_json=ON -DCMAKE_DISABLE_FIND_PACKAGE_pugixml=ON
         -DCMAKE_DISABLE_FIND_PACKAGE_kurlyk=ON -DCMAKE_DISABLE_FIND_PACKAGE_CURL=ON)
 endif()
+# Keep dependency prefix lists intact across the subprocess argument boundary.
+# Only the optional consumer inherits them; the core consumer stays isolated.
+file(WRITE "${WORK_DIR}/prefixes.cmake"
+    "set(CMAKE_PREFIX_PATH [==[${WORK_DIR}/prefix;${DEPENDENCY_PREFIX_PATH}]==] CACHE STRING \"Consumer package search prefixes\")\n")
 run_checked("${CMAKE_COMMAND}" -S "${WORK_DIR}/source" -B "${WORK_DIR}/build"
+    -C "${WORK_DIR}/prefixes.cmake"
     -G "${GENERATOR}" ${platform_args} "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}"
-    "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_PREFIX_PATH=${WORK_DIR}/prefix"
+    "-DCMAKE_BUILD_TYPE=Release"
     -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF
     ${component_args})
 run_checked("${CMAKE_COMMAND}" --build "${WORK_DIR}/build" --config "${CONFIG}")
