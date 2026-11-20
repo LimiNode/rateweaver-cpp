@@ -1,140 +1,175 @@
-# Native asynchronous foundation validation
+# Standalone foundation validation
 
-Validation date: 2026-11-20. This corrective pass starts at
-`282a6b3b3d580e3e05de4318aafe043cb3c5df4b` in Draft PR #1. The resulting exact
-revision and its CI run are recorded in that PR. No release tag or MGC change
-is included. Results below are from the corrected source, not the starting HEAD.
+Validation date: 2026-11-20. This corrective pass follows
+`28b2f8d7fd5fdf2b42677bd1e64f0476ec6f6162` in Draft PR #1. The PR records the
+published corrective HEAD and CI runs at that exact revision. These results
+supersede the earlier dependency audit.
 
-## Release matrix and package checks
+## Toolchains and package checks
 
-| Toolchain | Full CTest (including opt-in live) | Native owned limiter, 3 refreshes / 500 ms period |
+The full C++17 configuration enables JSON, XML, native HTTP, examples and the
+opt-in live smoke. Debug and Release use active checks, independent of NDEBUG.
+
+| Toolchain | Release full CTest | Debug full CTest |
 | --- | --- | --- |
-| MinGW GCC 15.2.0 | 9/9 passed, 47.32 s | 1063 ms |
-| MSVC 19.44.35228 | 9/9 passed, 40.32 s | 1066 ms |
-| Linux GCC 15.2.0 (Ubuntu/WSL) | 9/9 passed, 77.22 s | 1005 ms |
+| MinGW GCC 15.2 | 10/10, 131.40 s | 10/10, 107.24 s |
+| MSVC 19.44 | 10/10, 77.45 s | 10/10, 66.11 s |
+| Linux GCC 15.2, Ubuntu/WSL | 10/10, 292.01 s | 10/10, 192.03 s |
 
-The full configuration builds JSON, ECB, native kurlyk and live examples in
-Release. All 19 public headers compile individually as the first/only include
-of their translation units. Multi-TU linkage, standalone and embedded builds,
-relocated installed core and optional JSON/XML/kurlyk consumers pass. The core
-consumer disables JSON, XML, kurlyk and CURL discovery and remains usable.
-An additional MinGW ECB-only profile passes 6/6 with JSON/HTTP discovery disabled.
+Each full suite contains ten tests: live providers, Core, multi-TU linkage,
+embedded host, parser fixtures, native HTTP, manual HTTP processing, persistent
+refresh example, installed Core, and installed optional components. Live HTTPS
+is opt-in; mandatory CI runs the other nine. All 19 public headers also compile
+individually as the first and only include of their translation units.
 
-The optional installed consumer preserves external dependency prefixes, including
-transitive CURL dependencies from vcpkg. A local reproducer with two prefixes
-(one containing a space) failed dependency discovery before the correction and
-passed afterward. The prefix list crosses the subprocess boundary in an initial
-cache file; the independent core consumer does not inherit those dependencies.
+Builds use RateWeaver's pinned submodules, including source-built curl, without
+consumer-repository include/library paths. Separate executable checks cover:
 
-Core has 168 Release-active checks; parser fixtures have 66. The native loopback
-suite's check count varies with its control-poll scheduling; manual kurlyk
-processing has 7. No test relies on NDEBUG-disabled
-assertions. The core reader/writer regression checks atomic two-quote batches,
-revision monotonicity, 400 successful publications and snapshot ownership.
+- Embedded host: real TimeShield, JSON, pugixml and HTTP targets exist before
+  RateWeaver is added. Discovery is then disabled; target reuse and absence of
+  new duplicate targets are checked. JSON/XML parsing and native client lifecycle
+  code are linked and run.
+- Installed package: RateWeaver and dependencies occupy separate, relocated
+  prefixes. Registries are disabled and source paths in exports are rejected.
+  Core runs with JSON/XML/kurlyk/CURL discovery disabled. Missing mandatory
+  TimeShield fails configuration. The optional consumer parses feeds and links
+  native HTTP using installed packages.
+- Fresh first configuration: a new core-only MinGW Debug tree passed 5/5,
+  including separate-prefix Core, missing-TimeShield rejection and host reuse.
+  Dependency build directories are captured without relying on install scripts
+  that do not exist until generation.
 
-The NoConsensus regression uses conflicting fresh quotes plus an additional
-stale vote. It fails against the previous policy and passes with the correction.
-LastKnown also retains disabled-source, quorum, outlier, future-time and maximum
-age rejection, and contributor origin/usage. QuoteGraph has one canonical Core
-implementation, unconditional reciprocals and explicit reverse preference;
-the old routing graph, GraphBuildOptions and forwarding policy/graph headers
-have been removed.
+Core has 217 active checks and the full parser fixture executable has 111.
+They cover atomic snapshots, canonical reciprocals and explicit reverse quotes,
+source/quorum/outlier policy, final NoConsensus refusal, bounded LastKnown,
+arithmetic limits, identifier grammar, direct-pair diagnostics and time semantics.
 
-## Actual HTTP, cancellation and limiter checks
+An initial Linux Debug host fixture exceeded its former 120-second budget while
+installing dependencies and compiling the independent consumer on a WSL-mounted
+drive alongside sanitizer builds. The three package/build fixtures now allow
+300 seconds; native HTTP/manual liveness timeouts are unchanged. Its interrupted
+link left an invalid scratch executable, which was removed and linked again.
+The matrix reports completed runs rather than counting the timeout as passing.
 
-Tests use the exact MGC kurlyk pin
-`fe2698dec259a7e417883e1f41985ed21ec28b55`, real libcurl and a Python standard
-library HTTP server on an ephemeral loopback port. No fake transport or public
-network is needed. Covered behavior:
+## Dependency graph and reproduction
 
-- CDN/CBR JSON and ECB XML; successful chunked transfer parsed once;
-- ETag/304 retention, unsolicited 304, final 404/500/503, malformed JSON/XML,
-  empty body, empty feed, rejected partial feed and explicit partial acceptance;
-- native retry with intermediate non-final responses, timeout and streamed
-  overflow; old quotes/revision remain intact on failure;
-- same-source Busy, multiple providers publishing into one book, cancellation
-  followed by late successful response, terminal stop and reentrant parsing;
-- parser/controller/book destruction, native client destruction with pending
-  work, completion-clock failure, and host deinit with an active request;
-- actual TCP peer EOF after native cancellation/timeout/client destruction;
-- a single owned client limiter persists across three refreshes; a shared
-  sequential handle prevents the second client's arrival until the first gate
-  is released (the server rejects incorrect ordering);
-- init(false), manual process/poll and callback drain before client destruction,
-  with no background worker required by RateWeaver.
+CMake 3.21+ and C++17 are required. Exact tags and gitlinks are in the
+[dependency registry](dependencies.md). Core requires Time Shield 2.0 and
+platform Threads; JSON, XML and native HTTP remain optional. Time Shield 1.x
+is unsupported; old header paths are not probed as a fallback.
 
-The completion timestamp test signals from the actual final callback's clock
-sample, advances the injected clock, then polls: retrieval time stays at HTTP
-completion. It deliberately does not treat the pinned native group wait as a
-reliable drain assertion.
-
-These results do not establish a hard receive-memory ceiling or upstream race
-freedom. The pinned client's body buffering and group accounting defects are
-recorded with a separate change proposal in [the kurlyk audit](kurlyk-limitations.md).
-Cancel/stop fence publication; actual native I/O cancellation still belongs to
-the host client and can wait for callbacks. No blocking HTTP adapter was added.
-
-## Live HTTPS
-
-With an explicit trusted CA bundle, all three endpoints returned HTTP 200 and
-Updated on Windows and Linux. Each independent book reached revision 1:
-
-| Source | Quotes | Source timestamp (Unix ms) | Direct/reciprocal check |
-| --- | --- | --- | --- |
-| CDN | 339 | 1795046400000 | USD/EUR, observed contributors, Normal usage |
-| CBR redistribution | 54 | 1795163400000 | USD/RUB at the explicitly labelled feed timestamp |
-| ECB | 29 | 1795046400000 | EUR/USD, observed contributors, Normal usage |
-
-The executable prints HTTP/refresh status, attempts, source/retrieval timestamps,
-revision, converted amount and each contributor's origin/usage/reversal. Numeric
-rates are not asserted. CBR announced a future effective timestamp during this
-run: current valuation was correctly unavailable, then routing arithmetic was
-checked separately at the feed timestamp. That is not authorization to value
-current amounts with future observations.
-
-Live CTest is opt-in and excluded from mandatory CI. Exit 77 means endpoint or
-network unavailability and is displayed as SKIP. TLS trust-file/verification
-errors fail explicitly; a missing CA bundle is not reported as a successful
-network check. Configure RATEWEAVER_LIVE_CA_FILE or pass a bundle path directly
-to rateweaver_live_providers (Linux system bundle: /etc/ssl/certs/ca-certificates.crt).
-
-## Reproduction and dependencies
-
-Core: CMake 3.20+, C++17, platform Threads. Parser dependencies used here are
-MGC's nlohmann/json `55f93686c01528224f448c19128836e7df245f72` (3.12.0) and
-pugixml 1.15 `ee86beb30e4973f5feffe3ce63bfa4fbadf72f38`. Windows native HTTP
-uses MGC's existing shared curl 8.11.0; Linux uses its system libcurl 8.18.
-No dependency is copied into RateWeaver or required by core-only consumers.
+Standalone defaults to `RATEWEAVER_DEPENDENCY_MODE=BUNDLED`; embedded builds
+default to `EXISTING`. Compatible existing targets take precedence in both.
+The separately named `RateWeaverKurlykHttp::client` owns HTTP-only kurlyk,
+CURL and Threads. It does not replace upstream's full `kurlyk::kurlyk` target
+or configure unused WebSocket dependencies.
 
 ```sh
+git submodule update --init
 cmake -S . -B tmp/agent-work/release -DCMAKE_BUILD_TYPE=Release \
-  -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON \
-  -DRATEWEAVER_ENABLE_KURLYK=ON \
-  -DRATEWEAVER_KURLYK_INCLUDE_DIR=/path/to/pinned/kurlyk/include
+  -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=BUNDLED \
+  -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON \
+  -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
 cmake --build tmp/agent-work/release
 ctest --test-dir tmp/agent-work/release -C Release --output-on-failure
 ```
 
-Supply parser packages and CURL::libcurl (or the host's existing kurlyk target).
-Windows routine builds use MinGW Makefiles; additional MSVC uses Visual Studio
-17 2022. Linux uses Unix Makefiles. Builds use separate ignored task trees.
+Windows routine validation adds `-G "MinGW Makefiles"`; the MSVC profile uses
+`-G "Visual Studio 17 2022" -A x64` and `--config Debug` or `Release`.
+Linux uses Unix Makefiles and system OpenSSL development packages. Windows
+source-built curl uses Schannel. The pinned `curl-8_23_0` source header reports
+`8.23.0-DEV`; this is the upstream string at the documented gitlink, not an
+alternative dependency revision. Vendor files are unchanged.
 
-## Sanitizers and consumer readiness
+## Time and API corrections
 
-Current native/manual tests pass under ASan+UBSan (2/2, 4.31 s) and TSan
-(2/2, 4.11 s), with leak detection and halt-on-error enabled. The final empty
-clock-exception regression is included. No sanitizer findings were reported.
-The broader ASan+UBSan suite passed 8/8 and TSan core/native/manual passed 3/3;
-the affected native cases were rebuilt and rerun after the final correction.
-Compilation used -O1 -g -DNDEBUG, the corresponding -fsanitize flags and frame
-pointers. Instrumentation covers test executables and the library/dependency
-headers compiled into them; system libcurl and installed-consumer sub-builds
-were not instrumented. These executed paths do not prove upstream race freedom
-or repair the pinned dependency's documented synchronization defect.
+`ts_ms_t` aliases Time Shield's type. UTC samples use `time_shield::ts_ms()`;
+refresh intervals use `time_shield::monotonic_ms()`. Tests jump UTC forward and
+backward while cadence remains controlled by monotonic time. Final callbacks
+sample UTC, so delayed polling does not change retrieval time. Missing/throwing
+clocks, cancellation and reentry from both injected clocks are covered.
 
-Core and parsing are independently consumable. Native HTTP is suitable for
-integration evaluation; production MGC acceptance remains gated on the kurlyk
-fix/review and the [MGC consumer findings](mgc-integration.md). MGC PR #63 remains
-unchanged: unknown aggregate currency must not become Native, and its smoke
-checks must be active in Release. No historical quote store or accounting
-rounding policy is implemented by this library.
+`Quote::effective_at` is an optional eighth constructor argument; existing
+positions retain their meaning. Daily CDN/ECB dates and CBR applicability
+populate it instead of inventing publication instants. Future applicability is
+rejected for observed, synthetic and LastKnown rates even without an age limit
+or with publication skew allowed. Freshness selects publication, then effective,
+then retrieval time. Calendar conversion delegates to Time Shield 2.0 while
+preserving feed syntax. Fixtures include pre-epoch dates, leap years, offsets,
+milliseconds and malformed/signed-year input.
+
+`RateRouter::diagnose_pair()` returns the existing policy report on demand;
+ordinary conversion does not build a route-wide failure tree. Currency identifiers
+follow the documented ASCII grammar and length bound. Stricter identifiers and
+corrected daily timestamp meaning can change caller behavior. Adding a Quote
+member changes its layout: rebuild consumers rather than mixing header revisions.
+The fifth refresh clock remains UTC; deterministic cadence tests also inject the
+new sixth clock. Binary double and accounting rounding limits remain explicit in
+the [integration contract](integration.md).
+
+## Native HTTP and lifecycle
+
+Tests use kurlyk v1.1.1, actual libcurl and an ephemeral Python loopback server:
+
+- JSON/XML, chunked body parsed once, ETag/304 metadata retention;
+- final HTTP errors, native retries, timeout, malformed/empty/partial feeds,
+  streamed overflow and preservation of the previous book on failure;
+- Busy, cancel followed by late completion, terminal stop, reentrant parsing and
+  clocks, and publication fences;
+- client/book/parser/controller lifetimes, completion timestamps, manual
+  processing, host deinit and peer EOF after native abort;
+- persistent owned/shared native limits, immediate admission counts, timed waits,
+  gated outstanding counts and final callbacks before cancellation returns;
+- two refreshes through the example's single persistent client, including 304.
+
+Group regressions agree with v1.1.1's continuous outstanding counter; the old
+pending-to-active diagnosis is superseded. Buffering before the void streaming
+callback and waiting client cancellation remain source-confirmed constraints.
+Accepted-body rejection is not a receive-memory ceiling. Worker-callback
+cancellation recursion is unsupported here, not a newly reproduced deadlock.
+See the [kurlyk audit and separate upstream proposal](kurlyk-limitations.md).
+
+## Sanitizers and live HTTPS
+
+ASan+UBSan passed 4/4 focused tests in 5.09 s; TSan passed 4/4 in 4.83 s,
+with no findings. Both runs cover Core, full parser fixtures, native HTTP and
+manual processing, with leak detection/halt-on-error where applicable.
+Instrumentation uses `-O1 -g -DNDEBUG`, frame pointers and sanitizer flags for C
+and C++, covering bundled curl/pugixml and selected test executables. System
+OpenSSL and installed-consumer subprocess builds are outside instrumentation.
+Clean executed paths do not prove general race freedom, arbitrary concurrent
+teardown or peak-memory bounds.
+
+The opt-in live executable reports HTTP/refresh status, attempts, effective and
+retrieval times, revision, amount and provenance for CDN, CBR and ECB. Numeric
+market rates are not asserted. Current valuation rejects future-effective CBR
+data; separately labelled feed-time arithmetic is not historical lookup or
+permission to use future data for current money.
+
+The Windows live run returned HTTP 200 and Updated for all three feeds, each
+at revision 1, with Observed/Normal direct and reciprocal contributors:
+
+| Feed | Quotes | Effective time, Unix ms | Publication time |
+| --- | --- | --- | --- |
+| CDN USD | 339 | 1795132800000 | Not supplied |
+| CBR redistribution | 54 | 1795163400000 | Not supplied |
+| ECB | 29 | 1795046400000 | Not supplied |
+
+Configure `RATEWEAVER_BUILD_LIVE_SMOKE=ON` and, where needed,
+`RATEWEAVER_LIVE_CA_FILE=/path/to/cacert.pem`. Exit 77 reports endpoint/network
+unavailability as SKIP; TLS trust/verification errors fail. Live endpoints are
+excluded from mandatory CI.
+
+## Documentation boundary and remaining limits
+
+Public docs now describe generic dependency ownership, installation, host
+lifecycle, API and provider limitations. The internal integration plan was
+removed from the current tree and preserved in a private local handoff. Deletion
+does not erase published Git history. No consumer repository or vendor source
+was modified by this pass.
+
+Core and parsers are independently consumable. Native HTTP remains a foundation
+for integration evaluation; upstream body-cap and nonwaiting targeted cancellation
+work stays separate. There is no production resource-bound guarantee, historical
+store, decimal money type or accounting rounding policy. PR #1 stays Draft;
+no merge or release is part of validation.

@@ -1,0 +1,15 @@
+[submodule "external/time-shield-cpp"]
+	path = external/time-shield-cpp
+	url = https://github.com/LimiNode/time-shield-cpp.git
+[submodule "external/kurlyk"]
+	path = external/kurlyk
+	url = https://github.com/LimiNode/kurlyk.git
+[submodule "external/json"]
+	path = external/json
+	url = https://github.com/nlohmann/json.git
+[submodule "external/pugixml"]
+	path = external/pugixml
+	url = https://github.com/zeux/pugixml.git
+[submodule "external/curl"]
+	path = external/curl
+	url = https://github.com/curl/curl.git

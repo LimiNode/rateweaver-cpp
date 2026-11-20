@@ -2,6 +2,9 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+if(NOT TARGET time_shield::time_shield)
+    find_dependency(TimeShield 2.0 CONFIG)
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/rateweaverTargets.cmake")
 
 # Optional components are resolved only when requested. A core-only installed
@@ -34,7 +37,7 @@ foreach(component IN LISTS rateweaver_FIND_COMPONENTS)
         endif()
     elseif(component STREQUAL "kurlyk" AND @RATEWEAVER_ENABLE_KURLYK@)
         include("${CMAKE_CURRENT_LIST_DIR}/rateweaverKurlykDependency.cmake")
-        rateweaver_resolve_kurlyk("${rateweaver_FIND_REQUIRED_kurlyk}")
+        rateweaver_resolve_kurlyk("${rateweaver_FIND_REQUIRED_kurlyk}" EXISTING)
         if(TARGET rateweaver_deps::kurlyk)
             include("${CMAKE_CURRENT_LIST_DIR}/rateweaverKurlykTargets.cmake")
             set(rateweaver_kurlyk_FOUND TRUE)

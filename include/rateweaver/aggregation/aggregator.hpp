@@ -48,7 +48,8 @@ enum class QuoteExclusionReason {
     SyntheticDisabled, ///< Synthetic quotes are not enabled by the caller.
     ObservedPreferred, ///< Eligible observed quotes take precedence over synthetic ones.
     DuplicateSource,   ///< Another candidate from the same source was already accepted.
-    Outlier            ///< Rate differs too much from the pre-filter median.
+    Outlier,           ///< Rate differs too much from the pre-filter median.
+    FutureEffectiveDate ///< Source rate is not yet applicable at valuation time.
 };
 
 /// \brief Configures rate aggregation for a single directed currency pair.
@@ -78,9 +79,10 @@ struct AggregationOptions {
 
     /// \brief Optional maximum quote age in milliseconds.
     ///
-    /// Uses `published_at` if present, otherwise `retrieved_at`. A missing
+    /// Uses `published_at`, otherwise `effective_at`, otherwise `retrieved_at`. A missing
     /// timestamp excludes an observed quote when this limit is set.
-    /// \note std::nullopt disables freshness filtering, not fallback policy.
+    /// \note std::nullopt disables age filtering. Future source applicability
+    ///       is always rejected; clock skew cannot enable a future rate period.
     std::optional<ts_ms_t> max_age_ms;
 
     /// \brief Reference Unix timestamp in milliseconds for freshness checks.
@@ -132,6 +134,15 @@ struct AggregationResult {
         return status == AggregationStatus::Success && rate.has_value();
     }
 };
+
+namespace aggregation_detail {
+
+inline std::optional<ts_ms_t> age_timestamp(const Quote& quote) noexcept {
+    return quote.published_at ? quote.published_at
+        : quote.effective_at ? quote.effective_at : quote.retrieved_at;
+}
+
+} // namespace aggregation_detail
 
 /// \brief Performs deterministic, provenance-preserving quote aggregation.
 ///
@@ -203,7 +214,9 @@ public:
                 sample.exclusion = QuoteExclusionReason::InvalidRate;
             } else {
                 sample.rate = effective;
-                if (edge.quote.origin == QuoteOrigin::Synthetic) {
+                if (edge.quote.effective_at && *edge.quote.effective_at > now) {
+                    sample.exclusion = QuoteExclusionReason::FutureEffectiveDate;
+                } else if (edge.quote.origin == QuoteOrigin::Synthetic) {
                     if (!options.allow_synthetic_fallback) {
                         sample.exclusion = QuoteExclusionReason::SyntheticDisabled;
                     } else if (!synthetic_sources.insert(edge.quote.source_id).second) {
@@ -337,8 +350,7 @@ private:
     static QuoteExclusionReason freshness_status(const Quote& quote,
                                                  const AggregationOptions& options,
                                                  ts_ms_t now) noexcept {
-        const auto timestamp = quote.published_at ? quote.published_at
-                                                  : quote.retrieved_at;
+        const auto timestamp = aggregation_detail::age_timestamp(quote);
         if (!timestamp) {
             return options.max_age_ms ? QuoteExclusionReason::MissingTimestamp
                                       : QuoteExclusionReason::None;

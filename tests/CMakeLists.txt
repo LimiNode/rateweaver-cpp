@@ -19,8 +19,12 @@ add_test(NAME rateweaver_superproject
         "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}" "-DBUILD_DIR=${PROJECT_BINARY_DIR}"
         "-DGENERATOR=${CMAKE_GENERATOR}" "-DGENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
         "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}" "-DCONFIG=$<CONFIG>"
+        "-DDEPENDENCY_CONFIG=${PROJECT_BINARY_DIR}/dependency-test-config.cmake"
+        "-DHOST_JSON=${RATEWEAVER_BUILD_PROVIDERS}" "-DHOST_ECB=${RATEWEAVER_ENABLE_ECB}"
+        "-DHOST_KURLYK=${RATEWEAVER_ENABLE_KURLYK}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/superproject.cmake")
-set_tests_properties(rateweaver_superproject PROPERTIES TIMEOUT 120)
+# These checks install dependencies and compile independent consumers as well.
+set_tests_properties(rateweaver_superproject PROPERTIES TIMEOUT 300)
 
 rateweaver_test(rateweaver_provider_tests provider_tests.cpp)
 target_compile_definitions(rateweaver_provider_tests PRIVATE
@@ -54,6 +58,12 @@ if(RATEWEAVER_ENABLE_KURLYK AND RATEWEAVER_BUILD_PROVIDERS)
         "${CMAKE_CURRENT_SOURCE_DIR}/http_server.py"
         --exe $<TARGET_FILE:rateweaver_kurlyk_http_tests> --timeout 90 --manual)
     set_tests_properties(rateweaver_native_http_manual PROPERTIES TIMEOUT 100)
+    if(TARGET rateweaver_provider_refresh)
+        add_test(NAME rateweaver_provider_refresh_example COMMAND Python3::Interpreter
+            "${CMAKE_CURRENT_SOURCE_DIR}/http_server.py"
+            --exe $<TARGET_FILE:rateweaver_provider_refresh> --url-path /etag --timeout 30)
+        set_tests_properties(rateweaver_provider_refresh_example PROPERTIES TIMEOUT 40)
+    endif()
 endif()
 
 # Every public header is the first and only include in its own translation
@@ -98,6 +108,8 @@ if(RATEWEAVER_INSTALL)
     add_test(NAME rateweaver_installed_consumer
         COMMAND ${CMAKE_COMMAND}
             "-DBUILD_DIR=${PROJECT_BINARY_DIR}"
+            "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            "-DDEPENDENCY_CONFIG=${PROJECT_BINARY_DIR}/dependency-test-config.cmake"
             "-DCONSUMER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/install_consumer"
             "-DWORK_DIR=${PROJECT_BINARY_DIR}/install-consumer"
             "-DGENERATOR=${CMAKE_GENERATOR}"
@@ -105,24 +117,35 @@ if(RATEWEAVER_INSTALL)
             "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}"
             "-DCONFIG=$<CONFIG>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_consumer.cmake")
-    set_tests_properties(rateweaver_installed_consumer PROPERTIES TIMEOUT 120)
+    set_tests_properties(rateweaver_installed_consumer PROPERTIES TIMEOUT 300)
     if(RATEWEAVER_BUILD_PROVIDERS OR RATEWEAVER_ENABLE_ECB OR RATEWEAVER_ENABLE_KURLYK)
         add_test(NAME rateweaver_installed_components
             COMMAND ${CMAKE_COMMAND}
                 "-DBUILD_DIR=${PROJECT_BINARY_DIR}"
+                "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+                "-DDEPENDENCY_CONFIG=${PROJECT_BINARY_DIR}/dependency-test-config.cmake"
                 "-DCONSUMER_DIR=${CMAKE_CURRENT_SOURCE_DIR}/install_components"
                 "-DWORK_DIR=${PROJECT_BINARY_DIR}/install-components"
                 "-DCONSUMER_TYPE=components"
                 "-DCONSUME_JSON=${RATEWEAVER_BUILD_PROVIDERS}" "-DCONSUME_ECB=${RATEWEAVER_ENABLE_ECB}"
                 "-DCONSUME_KURLYK=${RATEWEAVER_ENABLE_KURLYK}"
-                "-DKURLYK_INCLUDE_DIR=${RATEWEAVER_KURLYK_INCLUDE_DIR}"
-                "-DCURL_INCLUDE_DIR=${CURL_INCLUDE_DIR}" "-DCURL_LIBRARY=${CURL_LIBRARY_RELEASE}"
-                "-DCURL_DIR=${CURL_DIR}"
-                "-DDEPENDENCY_PREFIX_PATH=${CMAKE_PREFIX_PATH}"
-                "-DJSON_DIR=${nlohmann_json_DIR}" "-DXML_DIR=${pugixml_DIR}"
                 "-DGENERATOR=${CMAKE_GENERATOR}" "-DGENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
                 "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}" "-DCONFIG=$<CONFIG>"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_consumer.cmake")
-        set_tests_properties(rateweaver_installed_components PROPERTIES TIMEOUT 120)
+        set_tests_properties(rateweaver_installed_components PROPERTIES TIMEOUT 300)
     endif()
 endif()
+
+# Persist lists as CMake data so semicolons survive the CTest subprocess boundary.
+set(dependency_build_dirs)
+get_directory_property(dependency_source_dirs DIRECTORY "${PROJECT_SOURCE_DIR}" SUBDIRECTORIES)
+foreach(dependency time-shield-cpp json pugixml curl)
+    set(dependency_source "${PROJECT_SOURCE_DIR}/external/${dependency}")
+    if(dependency_source IN_LIST dependency_source_dirs)
+        get_directory_property(dependency_build DIRECTORY "${dependency_source}" BINARY_DIR)
+        list(APPEND dependency_build_dirs "${dependency_build}")
+    endif()
+endforeach()
+file(WRITE "${PROJECT_BINARY_DIR}/dependency-test-config.cmake"
+    "set(DEPENDENCY_BUILD_DIRS [==[${dependency_build_dirs}]==])\n"
+    "set(DEPENDENCY_PREFIX_PATH [==[${CMAKE_PREFIX_PATH}]==])\n")

@@ -8,7 +8,7 @@
 
 namespace rateweaver {
 
-/// \brief Uses the CDN feed's date as a day-resolution source stamp at UTC midnight.
+/// \brief Uses the CDN rate date as day-resolution applicability at UTC midnight.
 inline Provider cdn_provider(std::string base = "USD") {
     base = normalize_currency_code(base);
     if (!provider_detail::is_feed_currency(base)) throw std::invalid_argument("Invalid CDN base currency");
@@ -24,8 +24,8 @@ inline Provider cdn_provider(std::string base = "USD") {
                 result.diagnostic = "Invalid CDN response schema";
                 return result;
             }
-            const auto published = provider_detail::date_ms((*document)["date"].get<std::string>());
-            if (!published) { result.diagnostic = "Invalid CDN source date"; return result; }
+            const auto effective = provider_detail::date_ms((*document)["date"].get<std::string>());
+            if (!effective) { result.diagnostic = "Invalid CDN source date"; return result; }
             std::set<std::string> currencies;
             for (const auto& entry : (*document)[lower].items()) {
                 const auto currency = normalize_currency_code(entry.key());
@@ -36,7 +36,7 @@ inline Provider cdn_provider(std::string base = "USD") {
                     continue;
                 }
                 if (currency != base) result.quotes.emplace_back(base, currency, *rate, source,
-                    QuoteOrigin::Observed, published, retrieved);
+                    QuoteOrigin::Observed, std::nullopt, retrieved, effective);
             }
             provider_detail::finish(result);
             if (result.rejected_entries) result.diagnostic = "CDN entries rejected";

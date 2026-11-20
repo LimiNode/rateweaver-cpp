@@ -28,7 +28,7 @@ void check(bool condition, const char* expression, int line) {
 
 #define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
 
-bool near(double left, double right) {
+bool approximately_equal(double left, double right) {
     return std::abs(left - right) <= 1e-12 * std::max(1.0, std::abs(right));
 }
 
@@ -53,6 +53,8 @@ RouterOptions router_options() {
 
 void currency_contract() {
     static_assert(std::is_same<ts_ms_t, std::int64_t>::value, "exact millisecond type");
+    static_assert(std::is_same<ts_ms_t, time_shield::ts_ms_t>::value, "Time Shield owns the timestamp type");
+    static_assert(noexcept(current_time_ms()) && noexcept(monotonic_time_ms()), "default clocks do not throw");
     CHECK(normalize_currency_code(" \tusd\r\n") == "USD");
     CHECK(normalize_currency_code("usdt") == "USDT");
     CHECK(normalize_currency_code("a b") == "A B");
@@ -61,7 +63,16 @@ void currency_contract() {
     CHECK(!is_valid_currency_code(""));
     CHECK(!is_valid_currency_code(std::string("A\0B", 3)));
     CHECK(is_valid_currency_code("X-CUSTOM.1"));
-    CHECK(is_valid_currency_code(std::string(1, static_cast<char>(0xC0))));
+    CHECK(!is_valid_currency_code(std::string(1, static_cast<char>(0xC0))));
+    CHECK(is_valid_currency_code("USDT") && is_valid_currency_code("XAU"));
+    CHECK(is_valid_currency_code("CHAIN:TOKEN_1") && is_valid_currency_code("1INCH"));
+    CHECK(is_valid_currency_code(std::string(32, 'A')));
+    CHECK(!is_valid_currency_code(std::string(33, 'A')));
+    CHECK(!is_valid_currency_code("-USD") && !is_valid_currency_code("USD/EUR"));
+    CHECK(!is_valid_currency_code("USD\\EUR") && !is_valid_currency_code("USD%"));
+    CHECK(!is_valid_currency_code(std::string("A\x7f", 2)));
+    CHECK(!is_valid_currency_code(normalize_currency_code(std::string("USD\0", 4))));
+    CHECK(!is_valid_currency_code(normalize_currency_code(std::string("\x1bUSD", 4))));
     CHECK(make_currency_pair("usd", " eur ") == (CurrencyPair{"USD", "EUR"}));
     CHECK(!is_valid_currency_pair({"USD", "USD"}));
     CHECK(is_valid_amount(0));
@@ -70,6 +81,125 @@ void currency_contract() {
     CHECK(!is_valid_rate(0));
     CHECK(!is_valid_rate(-1));
     CHECK(!is_valid_rate(std::numeric_limits<double>::quiet_NaN()));
+}
+
+void effective_time_contract() {
+    auto options = router_options();
+    Quote rate("USD", "EUR", 2, "daily", QuoteOrigin::Observed,
+               std::nullopt, now, now - 2000);
+    const QuoteGraph graph(std::vector<Quote>{rate});
+    QuoteBook book;
+    CHECK(book.replace_source("daily", {rate}) == QuotePublishStatus::Success);
+    const auto original = book.snapshot();
+    auto revised = rate;
+    revised.effective_at = now - 500;
+    CHECK(book.replace_source("daily", {revised}) == QuotePublishStatus::Success);
+    CHECK(book.snapshot().revision == original.revision + 1);
+    CHECK(book.snapshot().quotes[0].effective_at == now - 500);
+    CHECK(original.quotes[0].effective_at == now - 2000);
+    revised.from = "USD/EUR";
+    CHECK(book.replace_source("daily", {revised}) == QuotePublishStatus::InvalidQuote);
+    CHECK(book.snapshot().revision == original.revision + 1);
+    const QuoteGraph updated(book.snapshot());
+    CHECK(RateRouter(updated, options).convert(10, "USD", "EUR"));
+    auto report = RateRouter(graph, options).diagnose_pair("USD", "EUR");
+    CHECK(!report && report.aggregation.samples[0].exclusion == QuoteExclusionReason::Stale);
+    CHECK(!RateRouter(graph, options).convert(10, "USD", "EUR"));
+
+    // Retrieval cannot rejuvenate an old source rate. Bounded LastKnown only
+    // changes usage and keeps the complete quote, including reverse routes.
+    options.quote_policy.max_last_known_age_ms = 2000;
+    const auto conversion = RateRouter(graph, options).convert(10, "EUR", "USD");
+    CHECK(conversion && approximately_equal(*conversion.amount, 5));
+    const auto& contribution = conversion.route[0].contributors[0];
+    CHECK(contribution.usage == QuoteUsage::LastKnownFallback && contribution.reversed);
+    CHECK(contribution.quote.origin == QuoteOrigin::Observed);
+    CHECK(!contribution.quote.published_at && contribution.quote.effective_at == now - 2000);
+    CHECK(contribution.quote.retrieved_at == now && contribution.quote.source_id == "daily");
+    CHECK(graph.outgoing("USD")[0].quote.effective_at == now - 2000);
+
+    // An actual publication timestamp has priority for age, while explicit
+    // applicability remains an independent lower bound on valuation time.
+    rate.published_at = now - 500;
+    QuoteGraph republished(std::vector<Quote>{rate});
+    report = RateRouter(republished, options).diagnose_pair("USD", "EUR");
+    CHECK(report && report.usage[0] == QuoteUsage::Normal);
+    rate.published_at = now - 3000;
+    rate.effective_at = now - 500;
+    QuoteGraph old_publication(std::vector<Quote>{rate});
+    report = RateRouter(old_publication, options).diagnose_pair("USD", "EUR");
+    CHECK(!report && report.aggregation.samples[0].exclusion == QuoteExclusionReason::Stale);
+
+    rate.published_at = now;
+    rate.effective_at = now + 1;
+    QuoteGraph future(std::vector<Quote>{rate});
+    options.aggregation.max_future_skew_ms = 10000;
+    report = RateRouter(future, options).diagnose_pair("USD", "EUR");
+    CHECK(!report && report.aggregation.samples[0].exclusion == QuoteExclusionReason::FutureEffectiveDate);
+    CHECK(!RateRouter(future, options).convert(10, "EUR", "USD").amount);
+    options.quote_policy.max_last_known_age_ms.reset();
+    options.aggregation.max_age_ms.reset();
+    CHECK(!RateRouter(future, options).convert(10, "USD", "EUR"));
+    options.aggregation.reference_time = now + 1;
+    CHECK(RateRouter(future, options).convert(10, "USD", "EUR"));
+
+    rate.origin = QuoteOrigin::Synthetic;
+    options.aggregation.reference_time = now;
+    options.aggregation.allow_synthetic_fallback = true;
+    QuoteGraph future_assumption(std::vector<Quote>{rate});
+    CHECK(!RateRouter(future_assumption, options).convert(10, "USD", "EUR"));
+
+    options = router_options();
+    options.aggregation.reference_time = -1;
+    rate = Quote("USD", "EUR", 2, "past", QuoteOrigin::Observed,
+                 std::nullopt, 0, -1001);
+    QuoteGraph before_epoch(std::vector<Quote>{rate});
+    CHECK(RateRouter(before_epoch, options).convert(10, "USD", "EUR"));
+    options.aggregation.reference_time = 0;
+    report = RateRouter(before_epoch, options).diagnose_pair("USD", "EUR");
+    CHECK(!report && report.aggregation.samples[0].exclusion == QuoteExclusionReason::Stale);
+}
+
+void routing_diagnostics() {
+    auto options = router_options();
+    const QuoteGraph stale(std::vector<Quote>{quote("USD", "EUR", 2, "old", now - 2000)});
+    RateRouter router(stale, options);
+    auto report = router.diagnose_pair("USD", "EUR");
+    CHECK(!report && report.aggregation.status == AggregationStatus::NoEligibleQuotes);
+    CHECK(report.aggregation.samples[0].exclusion == QuoteExclusionReason::Stale);
+    CHECK(router.diagnose_pair("USD", "GBP").aggregation.status == AggregationStatus::NoQuotes);
+    CHECK(router.diagnose_pair("USD", "USD").aggregation.status == AggregationStatus::InvalidPair);
+    CHECK(router.diagnose_pair("USD", "BAD/CODE").aggregation.status == AggregationStatus::InvalidPair);
+    CHECK(router.convert(1, "USD", "BAD/CODE").status == ConversionStatus::InvalidCurrency);
+    CHECK(router.convert(1, "USD", std::string("EUR\0", 4)).status == ConversionStatus::InvalidCurrency);
+    options.aggregation.disabled_sources.insert("old");
+    report = RateRouter(stale, options).diagnose_pair("USD", "EUR");
+    CHECK(report.aggregation.samples[0].exclusion == QuoteExclusionReason::SourceDisabled);
+    options = router_options();
+    options.aggregation.min_sources = 2;
+    const QuoteGraph single_source(std::vector<Quote>{quote("USD", "EUR", 2, "one"),
+        quote("EUR", "USD", 0.5, "one")});
+    report = RateRouter(single_source, options).diagnose_pair("USD", "EUR");
+    CHECK(report.aggregation.status == AggregationStatus::InsufficientSources);
+    CHECK(report.aggregation.eligible_sources == 1);
+    options.aggregation.max_relative_deviation = 0.1;
+    const QuoteGraph divergent(std::vector<Quote>{quote("USD", "EUR", 1, "a"), quote("USD", "EUR", 10, "b")});
+    CHECK(RateRouter(divergent, options).diagnose_pair("USD", "EUR").aggregation.status == AggregationStatus::NoConsensus);
+    options.aggregation.min_sources = 0;
+    CHECK(RateRouter(divergent, options).diagnose_pair("USD", "EUR").aggregation.status == AggregationStatus::InvalidOptions);
+    options = router_options();
+    options.max_hops = 0;
+    CHECK(RateRouter(stale, options).diagnose_pair("USD", "EUR").aggregation.status == AggregationStatus::InvalidOptions);
+
+    auto missing = quote("USD", "EUR", 2);
+    missing.published_at.reset();
+    missing.retrieved_at.reset();
+    const QuoteGraph no_time(std::vector<Quote>{missing});
+    options = router_options();
+    report = RateRouter(no_time, options).diagnose_pair("USD", "EUR");
+    CHECK(report.aggregation.samples[0].exclusion == QuoteExclusionReason::MissingTimestamp);
+    options.aggregation.max_age_ms.reset();
+    CHECK(RateRouter(no_time, options).diagnose_pair("USD", "EUR"));
 }
 
 void publication_contract() {
@@ -161,7 +291,7 @@ void aggregation_contract() {
     CHECK(result.samples[0].contributed && result.samples[1].contributed && result.samples[2].contributed);
     options.strategy = AggregationStrategy::Mean;
     result = RateAggregator::aggregate(graph, "USD", "EUR", options);
-    CHECK(result && near(*result.rate, 4));
+    CHECK(result && approximately_equal(*result.rate, 4));
     options.strategy = AggregationStrategy::Priority;
     result = RateAggregator::aggregate(graph, "USD", "EUR", options);
     CHECK(result && *result.rate == 1);
@@ -369,19 +499,19 @@ void routing_contract() {
     auto options = router_options();
     RateRouter router(graph, options);
     auto result = router.convert(10, " usd ", "gbp");
-    CHECK(result && near(*result.amount, 200));
+    CHECK(result && approximately_equal(*result.amount, 200));
     CHECK(result.route.size() == 2 && result.route[0].to() == "AUD");
     CHECK(result.route[0].contributors[0].quote.source_id == "feed");
     CHECK(result.route[0].contributors[0].quote.published_at == now);
     result = router.convert(12, "GBP", "EUR");
-    CHECK(result && near(*result.amount, 4));
+    CHECK(result && approximately_equal(*result.amount, 4));
     CHECK(result.route[0].contributors[0].reversed);
     CHECK(result.route[0].contributors[0].effective_rate == 1.0 / 3.0);
     CHECK(result.route[0].contributors[0].quote.from == "EUR");
     result = router.convert(0, "USD", "GBP");
     CHECK(result && result.amount == 0);
     result = router.convert(-10, "USD", "GBP");
-    CHECK(result && near(*result.amount, -200));
+    CHECK(result && approximately_equal(*result.amount, -200));
     result = router.convert(0, "USD", "ZZZ");
     CHECK(!result && result.status == ConversionStatus::NoRoute && !result.amount);
     result = router.convert(10, "usd", "USD");
@@ -389,7 +519,7 @@ void routing_contract() {
     CHECK(router.convert(10, "", "USD").status == ConversionStatus::InvalidCurrency);
     CHECK(router.convert(std::numeric_limits<double>::quiet_NaN(), "USD", "EUR").status == ConversionStatus::InvalidAmount);
     result = router.convert(10, std::vector<std::string>{"USD", "EUR", "GBP"});
-    CHECK(result && near(*result.amount, 60));
+    CHECK(result && approximately_equal(*result.amount, 60));
     CHECK(router.convert(10, std::vector<std::string>{"USD", "EUR", "usd"}).status == ConversionStatus::InvalidRoute);
     CHECK(router.convert(10, std::vector<std::string>{}).status == ConversionStatus::InvalidRoute);
     CHECK(router.convert(10, std::vector<std::string>{"USD", "ZZZ"}).status == ConversionStatus::NoRoute);
@@ -465,6 +595,8 @@ int main() {
         graph_contract();
         aggregation_contract();
         freshness_contract();
+        effective_time_contract();
+        routing_diagnostics();
         policy_contract();
         last_known_preserves_rejection();
         routing_contract();

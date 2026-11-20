@@ -79,8 +79,8 @@ inline Provider ecb_provider() {
                 if (dated) { result.diagnostic = "Multiple ECB dates"; return result; }
                 dated = child;
             }
-            const auto published = provider_detail::date_ms(dated.attribute("time").value());
-            if (!dated || !published) { result.diagnostic = "Missing or invalid ECB source date"; return result; }
+            const auto effective = provider_detail::date_ms(dated.attribute("time").value());
+            if (!dated || !effective) { result.diagnostic = "Missing or invalid ECB source date"; return result; }
             std::set<std::string> currencies;
             for (const auto& child : dated.children()) {
                 if (child.type() != pugi::node_element) continue;
@@ -96,7 +96,7 @@ inline Provider ecb_provider() {
                     continue;
                 }
                 if (currency != "EUR") result.quotes.emplace_back("EUR", currency, rate, source,
-                    QuoteOrigin::Observed, published, retrieved);
+                    QuoteOrigin::Observed, std::nullopt, retrieved, effective);
             }
             provider_detail::finish(result);
             if (result.rejected_entries) result.diagnostic = "ECB entries rejected";

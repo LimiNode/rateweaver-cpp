@@ -79,24 +79,42 @@ void disconnected(kurlyk::HttpClient& client, const std::string& name) {
 
 void success_and_freshness(const std::string& base) {
     QuoteBook book;
+    std::atomic<ts_ms_t> utc{stamp};
+    ts_ms_t tick = 1000;
     kurlyk::HttpClient client;
     configure(client);
-    std::atomic<ts_ms_t> now{stamp};
-    KurlykRefresh refresh(book, client, endpoint(base, "/etag"), {100, 4096, false}, [&] { return now.load(); });
+    KurlykRefresh refresh(book, client, endpoint(base, "/etag"), {100, 4096, false},
+        [&] { return utc.load(); }, [&] { return tick; });
     CHECK(refresh.start() == RefreshStatus::Started);
     CHECK(refresh.start() == RefreshStatus::Busy);
     CHECK(finish(refresh).status == RefreshStatus::Updated);
     const auto published = book.snapshot();
     CHECK(published.revision == 1);
     CHECK(published.quotes.size() == 2);
-    CHECK(published.quotes[0].published_at == 1704153600000LL);
+    CHECK(!published.quotes[0].published_at);
+    CHECK(published.quotes[0].effective_at == 1704153600000LL);
     CHECK(published.quotes[0].retrieved_at == stamp);
     CHECK(refresh.start() == RefreshStatus::NotDue);
-    now.fetch_add(100);
+    // Wall-clock changes affect retrieval metadata, never refresh scheduling.
+    utc.store(stamp - 100000);
+    CHECK(refresh.start() == RefreshStatus::NotDue);
+    tick += 99;
+    CHECK(refresh.start() == RefreshStatus::NotDue);
+    ++tick;
     CHECK(refresh.start() == RefreshStatus::Started);
     CHECK(finish(refresh).status == RefreshStatus::NotModified);
     CHECK(book.snapshot().revision == published.revision);
     CHECK(book.snapshot().quotes[0].retrieved_at == stamp);
+    CHECK(book.snapshot().quotes[0].effective_at == published.quotes[0].effective_at);
+    utc.store(stamp + 86400000);
+    CHECK(refresh.start() == RefreshStatus::NotDue);
+    tick += 100;
+    CHECK(refresh.start() == RefreshStatus::Started);
+    CHECK(finish(refresh).status == RefreshStatus::NotModified);
+    tick += 100;
+    CHECK(refresh.start() == RefreshStatus::Started);
+    CHECK(finish(refresh).status == RefreshStatus::NotModified);
+    CHECK(book.snapshot().revision == published.revision);
     CHECK(!refresh.busy());
     CHECK(!refresh.poll());
 }
@@ -121,7 +139,7 @@ void chunked_and_completion_time(const std::string& base) {
     };
     KurlykRefresh refresh(book, client, provider, {0, 4096, false}, [clock] {
         const auto value = clock->now.load();
-        if (clock->calls.fetch_add(1) == 1) clock->sampled.set_value();
+        if (clock->calls.fetch_add(1) == 0) clock->sampled.set_value();
         return value;
     });
     CHECK(refresh.start() == RefreshStatus::Started);
@@ -134,6 +152,72 @@ void chunked_and_completion_time(const std::string& base) {
     CHECK(parse_calls == 1);
     CHECK(book.snapshot().quotes.size() == 2);
     CHECK(book.snapshot().quotes[0].retrieved_at == stamp);
+}
+
+void refresh_clock_failures(const std::string& base) {
+    QuoteBook book;
+    std::atomic<ts_ms_t> utc{stamp};
+    ts_ms_t tick = 2000;
+    bool throw_tick = true;
+    const auto host_thread = std::this_thread::get_id();
+    kurlyk::HttpClient client;
+    configure(client);
+    KurlykRefresh refresh(book, client, endpoint(base, "/error"), {100, 4096, false},
+        [&] { return utc.load(); }, [&] {
+            CHECK(std::this_thread::get_id() == host_thread);
+            if (throw_tick) throw std::runtime_error("monotonic clock failure");
+            return tick;
+        });
+    bool threw = false;
+    try { refresh.start(); } catch (const std::runtime_error&) { threw = true; }
+    CHECK(threw);
+    CHECK(!refresh.busy());
+    throw_tick = false;
+    CHECK(refresh.start() == RefreshStatus::Started);
+    CHECK(finish(refresh).status == RefreshStatus::HttpError);
+    CHECK(refresh.start() == RefreshStatus::NotDue);
+    utc.store(stamp - 86400000);
+    tick += 99;
+    CHECK(refresh.start() == RefreshStatus::NotDue);
+    utc.store(stamp + 86400000);
+    ++tick;
+    CHECK(refresh.start() == RefreshStatus::Started);
+    CHECK(finish(refresh).status == RefreshStatus::HttpError);
+    CHECK(book.snapshot().revision == 0);
+
+    for (int mode = 0; mode != 2; ++mode) {
+        kurlyk::HttpClient reentrant_client;
+        configure(reentrant_client);
+        std::unique_ptr<KurlykRefresh> reentrant;
+        reentrant = std::make_unique<KurlykRefresh>(book, reentrant_client,
+            endpoint(base, "/cdn"), RefreshOptions{0, 4096, false}, [] { return stamp; }, [&] {
+                if (mode == 0) reentrant->cancel();
+                else reentrant->stop();
+                return tick;
+            });
+        CHECK(reentrant->start() == (mode == 0 ? RefreshStatus::Cancelled : RefreshStatus::Stopped));
+        CHECK(!reentrant->busy());
+    }
+
+    // The client drains before this owner is destroyed, even if a check throws.
+    std::unique_ptr<KurlykRefresh> completion;
+    kurlyk::HttpClient completion_client;
+    configure(completion_client);
+    completion = std::make_unique<KurlykRefresh>(book, completion_client,
+        endpoint(base, "/cdn"), RefreshOptions{0, 4096, false}, [&] {
+            completion->cancel();
+            return stamp;
+        });
+    CHECK(completion->start() == RefreshStatus::Started);
+    CHECK(finish(*completion).status == RefreshStatus::Cancelled);
+    CHECK(book.snapshot().revision == 0);
+
+    kurlyk::HttpClient invalid_client;
+    configure(invalid_client);
+    KurlykRefresh invalid_utc(book, invalid_client, endpoint(base, "/cdn"), {}, {});
+    CHECK(invalid_utc.start() == RefreshStatus::InvalidOptions);
+    KurlykRefresh invalid_tick(book, invalid_client, endpoint(base, "/cdn"), {}, [] { return stamp; }, {});
+    CHECK(invalid_tick.start() == RefreshStatus::InvalidOptions);
 }
 
 void errors_preserve_book(const std::string& base) {
@@ -317,10 +401,8 @@ void parser_boundary(const std::string& base) {
         CHECK(book.replace_source("cdn:usd", {{"USD", "EUR", 0.7, "cdn:usd"}}) == QuotePublishStatus::Success);
         kurlyk::HttpClient client;
         configure(client);
-        const auto clock_calls = std::make_shared<std::atomic<int>>(0);
-        KurlykRefresh refresh(book, client, endpoint(base, "/cdn"), {0, 4096, false}, [clock_calls, message] {
-            if (++*clock_calls == 2) throw std::runtime_error(message);
-            return stamp;
+        KurlykRefresh refresh(book, client, endpoint(base, "/cdn"), {0, 4096, false}, [message]() -> ts_ms_t {
+            throw std::runtime_error(message);
         });
         CHECK(refresh.start() == RefreshStatus::Started);
         CHECK(finish(refresh).status == RefreshStatus::ParseError);
@@ -409,6 +491,54 @@ void owned_rate_limit_persists(const std::string& base) {
     std::cout << "Owned native limit: three refreshes, period 500 ms, elapsed " << elapsed << " ms\n";
 }
 
+void native_group_accounting(const std::string& base, kurlyk::HttpClient& commands) {
+    std::atomic<int> completed{0};
+    std::atomic<bool> failed{false};
+    kurlyk::HttpClient client(base);
+    configure(client);
+    const auto observe = [&](kurlyk::HttpResponsePtr response) {
+        if (!response->ready) return;
+        if (response->error_code || response->status_code != 200) failed.store(true);
+        completed.fetch_add(1);
+    };
+    // A wait immediately after admission must include pending-to-active handoff.
+    for (int attempt = 0; attempt != 32; ++attempt) {
+        CHECK(client.get("/cdn", {}, {}, observe));
+        CHECK(client.wait_requests_for(5s));
+        CHECK(completed.load() == attempt + 1);
+        CHECK(client.in_flight_requests() == 0);
+    }
+    CHECK(!failed.load());
+    completed.store(0);
+    constexpr int batch = 8;
+    for (int attempt = 0; attempt != batch; ++attempt) {
+        CHECK(client.get("/gate/group-accounting", {}, {}, observe));
+        CHECK(client.in_flight_requests() == static_cast<std::size_t>(attempt + 1));
+    }
+    requested(commands, "group-accounting");
+    for (int sample = 0; sample != 1000; ++sample) {
+        CHECK(client.in_flight_requests() == batch);
+        std::this_thread::yield();
+    }
+    CHECK(!client.wait_requests_for(1ms));
+    control(commands, "/release/group-accounting");
+    CHECK(client.wait_requests_for(5s));
+    CHECK(completed.load() == batch);
+    CHECK(client.in_flight_requests() == 0);
+    CHECK(!failed.load());
+
+    // Cancellation must also deliver every final callback before its barrier.
+    completed.store(0);
+    for (int attempt = 0; attempt != 32; ++attempt) {
+        CHECK(client.get("/cdn", {}, {}, [&](kurlyk::HttpResponsePtr response) {
+            if (response->ready) completed.fetch_add(1);
+        }));
+        client.cancel_requests();
+        CHECK(completed.load() == attempt + 1);
+        CHECK(client.in_flight_requests() == 0);
+    }
+}
+
 void shutdown_with_inflight(const std::string& base, kurlyk::HttpClient& commands) {
     QuoteBook book;
     kurlyk::HttpClient client;
@@ -429,10 +559,10 @@ void manual_processing(const std::string& base) {
     kurlyk::init(false);
     {
         QuoteBook book;
-        kurlyk::HttpClient client;
-        configure(client);
         const auto host_thread = std::this_thread::get_id();
         bool completion_on_host = false;
+        kurlyk::HttpClient client;
+        configure(client);
         KurlykRefresh refresh(book, client, endpoint(base, "/cdn"), {0, 4096, false}, [&] {
             completion_on_host = std::this_thread::get_id() == host_thread;
             return stamp;
@@ -473,6 +603,7 @@ int main(int argc, char** argv) {
             configure(commands);
             success_and_freshness(base);
             chunked_and_completion_time(base);
+            refresh_clock_failures(base);
             errors_preserve_book(base);
             native_retry_and_headers(base);
             timeout_cancel_and_overflow(base, commands);
@@ -481,6 +612,7 @@ int main(int argc, char** argv) {
             destruction_while_pending(base, commands);
             native_rate_limits(base, commands);
             owned_rate_limit_persists(base);
+            native_group_accounting(base, commands);
             shutdown_with_inflight(base, commands);
         }
         kurlyk::deinit();

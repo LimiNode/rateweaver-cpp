@@ -1,83 +1,59 @@
-# Implementation inventory and gaps
+# Implementation inventory and boundaries
 
-Audit baseline: `848bad90818a1d0f8625ab76d1db1feb08876b9c` (`main`).
-Audit date: 2026-11-19. This inventory separates source evidence at that
-revision from checks performed for the consumer foundation change.
+Recovered public baseline: `848bad90818a1d0f8625ab76d1db1feb08876b9c` (`main`).
+This inventory distinguishes source recovered at that revision from the current
+foundation. Actual executed checks belong to [validation](validation.md).
 
-## Baseline source inventory
+## Recovered baseline
 
-| Area | Implemented source at baseline | Missing or unverified at baseline |
+| Area | Existing source | Missing or unverified evidence |
 | --- | --- | --- |
-| Core types | Quote origin/usage, optional publication/retrieval timestamps, route contributors, optional conversion amount and explicit status | No compilable consumer validation; `types.hpp` depends on a nonexistent path in MGC's pinned time-shield-cpp. |
-| Currency | ASCII normalization, structural canonical-code validation, directed pairs | No regression tests. Validation intentionally permits punctuation/non-ASCII bytes and is not an ISO whitelist or UTF-8 check. |
-| QuoteBook | Per-source atomic replacement, duplicate validation, shared-mutex reads, owned snapshots and revisions | No concurrency or failed-publication regressions. Empty batches intentionally erase data; providers must not publish failures as empty success. |
-| Graph | Immutable owned quotes, deterministic edge order, reciprocal edges and explicit-reverse preference | Duplicate `GraphEdge`/`QuoteGraph` definitions in `core/graph.hpp` and `routing/graph.hpp`; `rateweaver/graph.hpp` includes absent `graph/graph.hpp`. |
-| Aggregation | Median, mean, priority, source disabling, age/skew checks, diagnostics, outlier filtering, source quorum and synthetic fallback | No tests; direct time-shield includes are incompatible with the target consumer pin. |
-| Quote policy | Umbrella/router references to QuotePolicy and LastKnown usage types | `policies/quote_policy.hpp` is absent. LastKnown behavior cannot be called implemented at this baseline. |
-| Routing | Breadth-first simple paths, hop/search limits, explicit routes, amount validation, provenance assembly, overflow/zero-underflow checks | Header lacks required domain includes and has an extra namespace close; depends on absent quote policy. No executable correctness evidence. |
-| Umbrellas | Root and domain include entry points | Broken graph/policy includes and duplicate graph ownership prevent self-contained consumer use. |
-| Package | Header-only layout and license | No CMake target, install/export config, tests, examples, CI or independent installed consumer. |
-| Providers/runtime | Intended architecture in README only | No HTTP transport, parsers, fixtures, refresh/cancellation implementation or network evidence. |
+| Core | Quote provenance, publication/retrieval times, optional conversion amount/status | No consumer build; assumed Time Shield include layout was not validated. |
+| Currency | ASCII normalization and permissive structural validation | No tests or bounded canonical identifier contract. |
+| QuoteBook | Atomic source replacement, duplicate validation, shared-mutex snapshots/revisions | No concurrent or failed-publication regressions. |
+| Graph | Owned deterministic edges, reciprocals and explicit reverse preference | Duplicate graph definitions and broken forwarding include. |
+| Aggregation | Median/mean/priority, filters, outliers/quorum and synthetic selection | No executable correctness evidence. |
+| Policy/routing | Router and LastKnown-related references | Missing quote-policy file, incomplete includes and a namespace error prevented standalone use. |
+| Package | Header-only source layout and license | No CMake exports, installed consumers, tests, examples or CI. |
+| Providers/runtime | README intentions | No parsers, transport, refresh or provider tests. |
 
-The baseline README says the API is unimplemented while substantial source
-exists, and says standard chrono is sufficient while headers require
-time-shield-cpp. Neither statement establishes a usable package.
+## Current ownership and contracts
 
-## Foundation decisions
+The runtime path remains QuoteBook -> immutable Core QuoteGraph -> Aggregation
+and QuotePolicy -> RateRouter. No second graph engine or synchronous transport
+layer is introduced. Core owns the graph; Aggregation owns QuotePolicy and the
+bounded LastKnown policy. NoConsensus stays a final refusal.
 
-Preserve the QuoteBook → immutable QuoteGraph → aggregation/quote policy →
-RateRouter structure. Repair header/domain ownership rather than introduce a
-second graph engine. Reconstruct the missing policy with explicit bounded
-LastKnown semantics and provenance; do not describe this as a tested baseline
-feature.
+Time Shield 2.0 is a declared Core dependency. UTC quote/valuation timestamps
+and monotonic refresh intervals have different clock functions. Date validation
+and conversion use the dependency where semantics match; provider-specific
+schema and precision rules stay in provider parsing.
 
-Use a signed 64-bit Unix millisecond timestamp and C++17 clock for defaults.
-This retains the documented millisecond representation while removing a
-mandatory dependency and the incompatible time-shield include paths. Tests
-must supply deterministic reference timestamps.
+Quotes retain separate optional publication, effective and retrieval timestamps.
+Daily providers use effective-date markers; future effective quotes cannot value
+current money. Freshness uses publication, then effective, then retrieval time.
+LastKnown relaxes only age and preserves all other exclusions and provenance.
 
-Keep transport, parsing and quote publication separate. JSON providers may use
-the embedding project's nlohmann JSON target; ECB XML is optional and alone
-requires pugixml. The embedding host owns HTTP execution, cancellation and
-refresh scheduling. Core/router checks must run without network access or
-provider dependencies.
+| Area | Implemented foundation | Boundary |
+| --- | --- | --- |
+| Core/graph/router | Atomic snapshots, owned deterministic reciprocal graph, bounded routes, amount/error status, provenance | No broker tick/execution model. |
+| Aggregation/policy | Deterministic strategies, source disabling/quorum, outliers, explicit synthetic fallback, bounded LastKnown | Source identity is not proof of statistical independence. |
+| Time/identifiers | Time Shield clocks, effective-time separation, bounded ASCII canonical identifiers | No ISO currency registry, aliases or historical store. |
+| Diagnostics | Existing policy result available through direct-pair `diagnose_pair()` | No automatic route-wide diagnostics tree in every conversion result. |
+| Providers | Separate CDN/CBR JSON and optional official ECB XML parsing | Network connectivity remains optional for Core and parser tests. |
+| Refresh | Native async start/poll, persistent dedicated client, monotonic cadence, ETag, final-callback publication fence | Host owns native runtime, I/O cancellation, HTTP retries/rate limits and scheduling. |
+| Dependency delivery | Pinned submodules, explicit bundled/existing modes, installed dependency discovery | Embedded hosts own compatible shared targets; no second runtime or hidden version substitution. |
+| kurlyk v1.1.1 | Continuous native outstanding-group accounting; exception-isolated final completion | No pre-append receive cap or client-default-preserving nonwaiting cancel handle. See [audit](kurlyk-limitations.md). |
 
-## Verification ledger
+The removed generic transport/request/response/cancellation-token framework is
+not part of this API. Neither calendar/clock fallbacks to another Time Shield
+major version nor duplicate HTTP retry/rate-limit machinery are provided.
 
-| Current foundation area | Status and evidence |
-| --- | --- |
-| Core, graph and router | Implemented; core regressions exercise publication, revisions, numeric limits, deterministic routes and concurrent snapshots. |
-| Quote policy | Missing baseline implementation reconstructed; bounded LastKnown, per-input usage and preserved filtering are exercised by core tests. |
-| Package and umbrellas | Install/export, standalone/superproject builds and relocated core/component consumers; optional dependencies are isolated. |
-| Graph ownership | Canonical implementation in Core; Routing depends on Core. No old routing graph, forwarding graph header or GraphBuildOptions remains. Reciprocals are automatic. |
-| Quote policy correction | Implementation belongs to Aggregation. LastKnown cannot retry NoConsensus or rehabilitate already rejected outliers by adding stale votes. |
-| CDN/CBR/ECB | Separate JSON/XML parsers, offline fixtures, real loopback HTTP tests and an opt-in live example. See validation for observed results. |
-| Refresh | Native KurlykRefresh start/poll API; persistent host-owned HttpClient, source ETag, overlap gate and publication fence. No RateWeaver background thread or HTTP retry/limiter. |
-| Removed transport layer | HttpTransport, RateWeaver HttpRequest/HttpResponse, CancellationToken and the synchronous RefreshController have been removed. |
-| Pinned HTTP constraints | The exact MGC pin cannot enforce a pre-append receive memory cap or expose nonwaiting client cancellation. See the separate kurlyk proposal; these requirements remain gated. |
-| Historical valuation/MGC | No historical store or MGC adapter is implemented; the separate integration gate is blocked by the audited consumer defects. |
+## Remaining consumer responsibilities
 
-Source inventory is verified by reading the baseline commit. Packaging and
-behavioral claims require the actual Release-active tests, not this inventory.
-Record the final revision, toolchains, test results and unavailable checks in
-the change's validation report/PR; this section must not imply a passing run
-before one has occurred.
-
-The [validation report](validation.md) records the observed foundation checks.
-
-Required evidence for this change includes self-contained public headers and
-umbrellas; standalone and superproject configuration; an independent relocated
-installed consumer; currency/QuoteBook/graph/aggregation/router/policy
-regressions; concurrent reader/writer snapshots; and offline provider
-success/malformed/no-data/partial-data/error/cancellation publication behavior.
-Network availability is not a prerequisite or proof of these tests.
-
-## Remaining product boundaries
-
-There is no broker execution/tick feed, historical quote store, accounting
-rounding/decimal-money policy or automatic permission to use stale/synthetic
-rates. Daily reference feeds require a consumer valuation policy. A current
-quote snapshot plus a historical `reference_time` does not implement historical
-valuation. The [MGC proposal](mgc-integration.md) records the audited pins,
-consumer contract and current fail-closed blockers. No MGC submodule or runtime
-integration is included in the library foundation change.
+The library has no historical rate repository, decimal-money type or accounting
+rounding policy. Hosts must choose explicit freshness/skew/quorum policies and
+preserve unavailable results. A mixed-currency total needs known components;
+missing historical quotes cannot be replaced by today's rates. See the neutral
+[integration guide](integration.md) for that contract and the
+[dependency registry](dependencies.md) for reproducible builds.

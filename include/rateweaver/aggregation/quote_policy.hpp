@@ -77,7 +77,7 @@ public:
                 const auto& sample = result.aggregation.samples[i];
                 if (!sample.contributed || sample.edge.quote.origin != QuoteOrigin::Observed) continue;
                 const auto& quote = sample.edge.quote;
-                const auto timestamp = quote.published_at ? quote.published_at : quote.retrieved_at;
+                const auto timestamp = aggregation_detail::age_timestamp(quote);
                 if (timestamp && *timestamp <= *aggregation.reference_time &&
                     static_cast<std::uint64_t>(*aggregation.reference_time) -
                         static_cast<std::uint64_t>(*timestamp) >

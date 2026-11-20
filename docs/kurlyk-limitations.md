@@ -1,110 +1,68 @@
-# Pinned kurlyk audit and required upstream changes
+# kurlyk v1.1.1 API audit
 
-Audited dependency: `LimiNode/kurlyk`
-`fe2698dec259a7e417883e1f41985ed21ec28b55`, the MGC gitlink. This is an API
-constraint report, not a claim that all receive-limit requirements are met.
+Audited release: [kurlyk v1.1.1](https://github.com/LimiNode/kurlyk/releases/tag/v1.1.1),
+commit `b62cd53f672c47b74bb14d762ea9dc59a9df19ce`. This audit reads the published
+release, rather than assuming older dependency findings still apply. Observed
+runtime results belong to [validation](validation.md); source inspection alone
+is not a race-freedom proof.
 
-## Available native behavior
+## Version-specific findings
 
-`HttpClient` preserves its host, headers, timeout/retry defaults, request group,
-owned rate limits and externally assigned shared handles. Its callback API
-distinguishes streaming chunks (`stream_chunk`), intermediate retry responses
-(`!ready && !stream_chunk`) and final responses (`ready`). Final content contains
-the entire body, including bytes already delivered through streaming callbacks.
-RateWeaver never appends those chunks to final content.
+| Classification | Finding | Evidence at v1.1.1 |
+| --- | --- | --- |
+| Fixed in v1.1.1 | Group counts stay continuous across pending/active/retry transitions; public group queries no longer traverse worker-mutated request containers. | `HttpRequestManager::submit_request()` increments `m_group_request_counts` under `m_mutex`; queries read that map and `complete_group_request()` decrements it after the final user callback. |
+| Fixed in v1.1.1 | Callback exceptions do not skip group completion. | `HttpRequestContext::invoke_final_callback()` invokes an exception-isolated callback, then idempotent `complete()`. Its group callback still runs when rate-limit completion throws. Upstream includes corresponding regressions in `http_client_wait_requests_main.cpp`. |
+| Fixed in v1.1.1 | A timed-out group waiter can be removed. | Registration returns an ID; `HttpClient::wait_requests_for()` calls `cancel_wait_requests_by_group_id()` on timeout. |
+| Still reproducible | Streaming retains the complete native body before notification; an accepted-body limit is not a receive-memory cap. | `HttpRequestHandler::write_response_body()` appends before its void streaming callback and returns the full consumed size. No request option enforces a body cap before append. Loopback rejection tests do not prove a nonexistent memory guarantee. |
+| Still reproducible | Client cancellation/destruction can wait. | `HttpClient::cancel_requests()` waits on `future.get()`; its destructor calls that barrier. The worker-thread branch recursively calls `worker.process()` despite its warning. |
+| Not tested | General concurrent teardown, arbitrary reentrant callbacks, hostile compressed bodies, redirect chains and total peak-memory bounds. | Local tests cover specific lifecycle paths; they do not establish properties beyond those paths. Calling the cancellation worker branch from a curl callback is unsupported here, not a newly reproduced deadlock. |
+| Requires separate kurlyk PR | Pre-append receive cap and nonwaiting targeted cancellation preserving client defaults. | `get()` returns admission success, while `make_request()` and the client's request template/group identity are private. Manager cancellation IDs require independently prepared requests. Both extensions need upstream API changes; RateWeaver does not modify vendor headers or create another transport/scheduler. |
 
-The native handler disables retries once any streaming chunk has been emitted.
-An empty-body HTTP failure or connection failure can still retry. RateWeaver
-uses that behavior directly and does not add another retry loop. The retry
-counter identifies attempts; intermediate callbacks cannot publish quotes.
+The surviving buffer ordering and waiting APIs are source-confirmed constraints.
+The [native loopback checks](validation.md) exercise accepted-body rejection,
+actual connection abort and cancellation's final-callback drain. They do not
+measure peak memory, prove a hard receive cap or reproduce a callback deadlock.
 
-The audit also read OptionX's `BaseHttpClientComponent` and the IntradeBar and
-TradeUp HTTP components: they retain clients and configure limits once, poll
-only ready futures, and use native client cancellation during host teardown.
-RateWeaver borrows the ownership pattern without their component/task hierarchy.
+The former container-scanning group-accounting diagnosis is superseded for this
+release. No request remains to reimplement its outstanding-group counter.
+Manager processing and shutdown must remain on its designated processing thread.
+The host should use `deinit()` to stop/join the worker rather than race direct
+manager shutdown against active processing.
 
-## Receive size is not a hard memory limit
+## Refresh and ownership contract
 
-In `include/kurlyk/http/HttpRequestManager/HttpRequestHandler.hpp`,
-`write_response_body()` appends bytes to the internal complete response **before**
-calling the void streaming callback. It always returns the consumed byte count.
-There is no public abort decision or per-request receive-size limit.
-
-RateWeaver counts streamed bytes using subtraction before addition, reports
-`ResponseTooLarge` as soon as the host polls an exceeded limit, and never parses
-or publishes an oversized body. It retains no second assembled body. The native
-handler can continue buffering between a chunk and the host's cancellation.
-Thus `max_body_bytes` is an acceptance limit, not a guaranteed memory ceiling.
-The host should call its dedicated client's native `cancel_requests()` after
-an early `ResponseTooLarge` result. A test checks actual socket cancellation;
-it cannot establish a hard cap that this pinned API does not provide.
-
-## Publication cancellation and native I/O cancellation
-
-`HttpClient::get()` returns only admission success. Its request factory and
-group identifier are private. The public nonwaiting manager cancellation API
-requires a request/group identifier that this client API does not expose.
-`HttpClient::cancel_requests()` is a cancellation barrier: it waits for native
-cancellation callbacks. The client destructor invokes the same barrier.
+The native client retains headers, timeout/retry defaults, its request group and
+owned/shared rate-limit handles. Configure it once. Callback metadata separates
+stream chunks (`stream_chunk`), retry notifications (`!ready && !stream_chunk`)
+and final responses (`ready`). Final content already includes all received
+bytes; RateWeaver never appends chunks again. Native retries stop after any
+streaming chunk. RateWeaver adds no HTTP retry loop or rate counter.
 
 `KurlykRefresh::cancel()` and `stop()` immediately fence publication without
-waiting, accessing a destroyed client or capturing the client in a callback.
-They do not claim to abort native I/O. Keep the dedicated client alive and use
-its native cancellation barrier on the owning host thread when I/O must stop.
-The refresh overlap gate remains closed until the final native callback drains;
-polling then permits a later attempt after cancel. Stop is terminal. The host
-can create a new refresh object with the same still-live client after draining.
+waiting. Native I/O cancellation remains a host action. Keep the client and
+callback captures alive, invoke its barrier on the host thread, and poll until
+the final response drains before another refresh. Never destroy the client,
+invoke its barrier or stop its runtime from a callback running on that worker.
+`wait_requests()` explicitly rejects worker-thread use with `std::logic_error`.
 
-Never call the native barrier or destroy the client from its network callback.
-The pinned implementation has a worker-thread branch that recursively processes
-the manager; invoking it inside a curl callback can re-enter manager processing.
-RateWeaver does not use that branch, invent an executor to hide waiting, intercept
-authentication to extract private identities, or bypass client defaults by
-constructing unrelated requests directly in the manager.
+In manual mode the host must pump `process()` while work remains. A blocking
+barrier on that same thread cannot progress after pumping stops. The refresh
+busy gate follows its actual final-callback state.
 
-## Native group accounting and drain
+`max_body_bytes` bounds accepted data: accounting checks remaining capacity
+before addition, oversized content is never parsed/published, and the host
+cancels native I/O after an early `ResponseTooLarge`. Native buffering can grow
+between a chunk and cancellation. Do not describe this as a memory ceiling.
 
-The delayed-poll regression exposed an additional pinned problem:
-`HttpClient::wait_requests()` can return before its final callback. In
-`HttpRequestManager.hpp`, `process_pending_requests()` removes contexts from
-`m_pending_requests`, releases `m_mutex`, constructs a batch, and only then adds
-that batch to `m_active_request_batches`. During the handoff, group-count queries
-can observe zero because they count only pending, failed and active containers.
-The same query is used by the native group cancellation barrier and admission
-guard. RateWeaver's overlap fence therefore uses its own final-callback state,
-not native group-count/wait completion.
+## Separate upstream work
 
-The active/failed container mutations in worker processing also occur outside
-`m_mutex`, while public group-count queries traverse them under that mutex.
-That is a supported synchronization defect in the pinned dependency, not a
-RateWeaver lock that can repair it. Native barrier behavior in the exercised
-loopback cases is recorded in validation; it is not proof that arbitrary
-concurrent client teardown is safe. The completion timestamp regression waits
-for the clock sample inside the actual final callback instead of relying on
-`wait_requests()`.
+1. Expose a submission handle/ID from `HttpClient` preserving configured defaults
+   and group ownership. Provide nonwaiting cancellation that only schedules the
+   request and never recursively processes curl callbacks.
+2. Add a native body cap checked before append, with a distinct final diagnostic.
+   Define decoded-byte semantics and bound decompression as well.
+3. Document/test streaming ownership, retry/reset rules, compressed/chunked
+   bodies, redirects, chunk-callback cancellation and final-callback teardown.
 
-## Proposed separate kurlyk change
-
-Before claiming full receive-limit and nonwaiting I/O cancellation support:
-
-1. Expose a native request submission handle/ID from `HttpClient`, preserving
-   its default configuration and group ownership. Supply a nonwaiting cancel
-   operation that only schedules cancellation and never recursively processes
-   the current curl callback.
-2. Add a per-request received-body cap. In the native write handler, check
-   multiplication and remaining capacity **before** append and return a curl
-   write error immediately on overflow. Preserve a distinct limit-exceeded
-   diagnostic in the final response.
-3. Optionally allow streaming without retaining the complete body. Document
-   retry/reset semantics and the final-response content contract explicitly.
-4. Test large/chunked/compressed bodies, retries, cancel inside a chunk callback,
-   teardown, redirects and final callback delivery in kurlyk itself.
-5. Make group accounting continuous across pending/active/retry transitions and
-   synchronize public group queries with worker mutations. Wait/cancel/admission
-   decisions must use that continuous accounting and deliver callbacks without
-   holding the manager lock.
-
-No vendor copy or MGC gitlink is modified here. A separate kurlyk review and pin
-update are prerequisites for the stronger guarantees. Until then the native
-integration is useful for evaluation, but MGC production acceptance remains
-gated on these constraints and the consumer review.
+These extensions remain separate review work. No vendor code is changed by this
+dependency update and no production guarantee relies on them already existing.

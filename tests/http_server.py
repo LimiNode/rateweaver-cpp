@@ -13,6 +13,7 @@ import urllib.parse
 
 class FeedServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 64
 
     def __init__(self):
         super().__init__(("127.0.0.1", 0), Handler)
@@ -158,12 +159,14 @@ def main():
     parser.add_argument("--exe", type=pathlib.Path, required=True)
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--manual", action="store_true")
+    parser.add_argument("--url-path", default="")
     arguments = parser.parse_args()
     with FeedServer() as server:
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            command = [str(arguments.exe.resolve()), "http://127.0.0.1:" + str(server.server_port)]
+            command = [str(arguments.exe.resolve()),
+                       "http://127.0.0.1:" + str(server.server_port) + arguments.url_path]
             if arguments.manual:
                 command.append("manual")
             result = subprocess.run(command,

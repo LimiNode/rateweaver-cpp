@@ -19,8 +19,8 @@ inline Provider cbr_provider() {
                 result.diagnostic = "Invalid CBR response schema";
                 return result;
             }
-            const auto published = provider_detail::instant_ms((*document)["Date"].get<std::string>());
-            if (!published) { result.diagnostic = "Invalid CBR source timestamp"; return result; }
+            const auto effective = provider_detail::instant_ms((*document)["Date"].get<std::string>());
+            if (!effective) { result.diagnostic = "Invalid CBR source timestamp"; return result; }
             std::set<std::string> currencies;
             for (const auto& entry : (*document)["Valute"].items()) {
                 const auto& value = entry.value();
@@ -40,7 +40,7 @@ inline Provider cbr_provider() {
                     continue;
                 }
                 if (currency != "RUB") result.quotes.emplace_back(currency, "RUB", rate, source,
-                    QuoteOrigin::Observed, published, retrieved);
+                    QuoteOrigin::Observed, std::nullopt, retrieved, effective);
             }
             provider_detail::finish(result);
             if (result.rejected_entries) result.diagnostic = "CBR entries rejected";

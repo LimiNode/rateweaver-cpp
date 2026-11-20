@@ -34,7 +34,7 @@ bool convert(const rateweaver::QuoteBook& book, const std::string& from, const s
     rateweaver::QuoteGraph graph(book.snapshot());
     rateweaver::RouterOptions options;
     options.aggregation.reference_time = reference_time;
-    // Daily reference feeds can retain Friday's publication over a long weekend.
+    // Demonstration policy: daily observations can span a long weekend.
     options.aggregation.max_age_ms = 7 * 86400000LL;
     const auto result = rateweaver::RateRouter(graph, options).convert(1, from, to);
     if (!result) return false;
@@ -109,18 +109,19 @@ int run(const std::string& ca_file) {
                    (quote.from == "EUR" && quote.to == "USD");
         });
         const auto& quote = preferred == snapshot.quotes.end() ? snapshot.quotes.front() : *preferred;
-        std::cout << "  source_timestamp=" << quote.published_at.value_or(0)
+        std::cout << "  publication_timestamp=" << quote.published_at.value_or(0)
+                  << " effective_timestamp=" << quote.effective_at.value_or(0)
                   << " retrieval_timestamp=" << quote.retrieved_at.value_or(0) << '\n';
         auto valuation_time = rateweaver::current_time_ms();
-        if (quote.published_at && *quote.published_at > valuation_time) {
+        if (quote.effective_at && *quote.effective_at > valuation_time) {
             rateweaver::QuoteGraph graph(snapshot);
             rateweaver::RouterOptions options;
             options.aggregation.reference_time = valuation_time;
             options.aggregation.max_age_ms = 7 * 86400000LL;
             const auto current = rateweaver::RateRouter(graph, options).convert(1, quote.from, quote.to);
             if (current) { failed = true; continue; }
-            std::cout << "  current valuation unavailable: future source timestamp (expected)\n";
-            valuation_time = *quote.published_at;
+            std::cout << "  current valuation unavailable: future effective date (expected)\n";
+            valuation_time = *quote.effective_at;
             std::cout << "  feed-date routing check only; valuation_timestamp=" << valuation_time << '\n';
         }
         failed = !convert(book, quote.from, quote.to, valuation_time) ||

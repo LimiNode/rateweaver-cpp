@@ -1,4 +1,5 @@
 #include <rateweaver/providers/common.hpp>
+#include <rateweaver/routing/router.hpp>
 #if RATEWEAVER_TEST_JSON
 #include <rateweaver/providers.hpp>
 #endif
@@ -61,6 +62,41 @@ void timestamps() {
     CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T24:30:00Z"));
     CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00+14:01"));
     CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00.Z"));
+    CHECK(rateweaver::provider_detail::date_ms("0001-01-01") == -62135596800000LL);
+    CHECK(rateweaver::provider_detail::date_ms("9999-12-31") == 253402214400000LL);
+    CHECK(rateweaver::provider_detail::date_ms("1999-12-31") == 946598400000LL);
+    CHECK(rateweaver::provider_detail::date_ms("2000-01-01") == 946684800000LL);
+    CHECK(rateweaver::provider_detail::date_ms("2000-02-29") == 951782400000LL);
+    CHECK(rateweaver::provider_detail::date_ms("2024-12-31") == 1735603200000LL);
+    CHECK(rateweaver::provider_detail::date_ms("2025-01-01") == 1735689600000LL);
+    CHECK(!rateweaver::provider_detail::date_ms("2024-04-31"));
+    CHECK(!rateweaver::provider_detail::date_ms("2024/01/02"));
+    CHECK(!rateweaver::provider_detail::date_ms("2024-1-02"));
+    CHECK(!rateweaver::provider_detail::date_ms("2024-01-02 "));
+    CHECK(!rateweaver::provider_detail::date_ms("2024-01-0X"));
+    CHECK(!rateweaver::provider_detail::date_ms("+123-01-01"));
+    CHECK(!rateweaver::provider_detail::date_ms("-123-01-01"));
+    CHECK(rateweaver::provider_detail::instant_ms("1969-12-31T23:59:59.999Z") == -1);
+    CHECK(rateweaver::provider_detail::instant_ms("1970-01-01T00:00:00+03:00") == -10800000LL);
+    CHECK(rateweaver::provider_detail::instant_ms("1969-12-31T23:00:00-01:00") == 0);
+    CHECK(rateweaver::provider_detail::instant_ms("1970-01-01T14:00:00+14:00") == 0);
+    CHECK(rateweaver::provider_detail::instant_ms("1969-12-31T10:00:00-14:00") == 0);
+    CHECK(rateweaver::provider_detail::instant_ms("1970-01-01T00:00:00.12-00:00") == 120);
+    CHECK(rateweaver::provider_detail::instant_ms("2000-02-29T00:00:00Z") == 951782400000LL);
+    CHECK(!rateweaver::provider_detail::instant_ms("1900-02-29T00:00:00Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("0000-01-01T00:00:00Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("+123-01-01T00:00:00Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("-123-01-01T00:00:00Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:60Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00+15:00"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00-14:01"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00+03:60"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00.1234Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02t08:30:00Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30Z"));
+    CHECK(!rateweaver::provider_detail::instant_ms("2024-01-02T08:30:00Z "));
+    CHECK(!rateweaver::provider_detail::instant_ms(std::string("2024-01-02T08:30:00Z\0", 21)));
 }
 
 #if RATEWEAVER_TEST_JSON
@@ -73,7 +109,7 @@ void json_providers() {
     CHECK(parsed.quotes.size() == 3);
     const auto& eur = find(parsed, "USD", "EUR");
     CHECK(eur.rate == 0.8);
-    CHECK(eur.published_at == day);
+    CHECK(!eur.published_at && eur.effective_at == day);
     CHECK(eur.retrieved_at == now);
     CHECK(eur.source_id == cdn.source_id);
     CHECK(eur.origin == rateweaver::QuoteOrigin::Observed);
@@ -96,7 +132,8 @@ void json_providers() {
     CHECK(rub.status == rateweaver::ParseStatus::Success);
     CHECK(rub.quotes.size() == 3);
     CHECK(find(rub, "JPY", "RUB").rate == 0.6);
-    CHECK(find(rub, "USD", "RUB").published_at == day + 30600000LL);
+    CHECK(!find(rub, "USD", "RUB").published_at);
+    CHECK(find(rub, "USD", "RUB").effective_at == day + 30600000LL);
     CHECK(find(rub, "USD", "RUB").retrieved_at == now);
     CHECK(find(rub, "USD", "RUB").source_id == cbr.source_id);
     CHECK(cbr.parse("[]", now).status == rateweaver::ParseStatus::Malformed);
@@ -106,6 +143,30 @@ void json_providers() {
     CHECK(bad_nominal.status == rateweaver::ParseStatus::Partial);
     CHECK(bad_nominal.rejected_entries == 1);
     CHECK(bad_nominal.quotes.size() == 1);
+
+    const auto future = cbr.parse(R"({"Date":"2024-01-03T00:00:00+03:00","Valute":{"USD":{"CharCode":"USD","Nominal":1,"Value":90}}})", now);
+    CHECK(future && future.quotes[0].effective_at == day + 75600000LL);
+    rateweaver::RouterOptions options;
+    options.aggregation.reference_time = now;
+    options.aggregation.max_future_skew_ms = 86400000;
+    const rateweaver::QuoteGraph graph(future.quotes);
+    const rateweaver::RateRouter router(graph, options);
+    CHECK(!router.convert(1, "USD", "RUB").amount);
+    CHECK(!router.convert(1, "RUB", "USD").amount);
+    const auto report = router.diagnose_pair("USD", "RUB");
+    CHECK(report.aggregation.samples[0].exclusion == rateweaver::QuoteExclusionReason::FutureEffectiveDate);
+    options.aggregation.reference_time = future.quotes[0].effective_at;
+    CHECK(rateweaver::RateRouter(graph, options).convert(1, "USD", "RUB").amount == 90);
+
+    // Parsing the same daily value again updates retrieval evidence only.
+    const auto repeated = cdn.parse(fixture("cdn.json"), now + 86400000);
+    CHECK(find(repeated, "USD", "EUR").effective_at == eur.effective_at);
+    CHECK(find(repeated, "USD", "EUR").retrieved_at == now + 86400000);
+    options.aggregation.reference_time = now + 86400000;
+    options.aggregation.max_age_ms = 86400000;
+    const rateweaver::QuoteGraph repeated_graph(repeated.quotes);
+    const auto stale = rateweaver::RateRouter(repeated_graph, options).diagnose_pair("USD", "EUR");
+    CHECK(!stale && stale.aggregation.samples[0].exclusion == rateweaver::QuoteExclusionReason::Stale);
 }
 #endif
 
@@ -117,7 +178,8 @@ void ecb_provider() {
     CHECK(parsed.status == rateweaver::ParseStatus::Success);
     CHECK(parsed.quotes.size() == 3);
     CHECK(find(parsed, "EUR", "USD").rate == 1.25);
-    CHECK(find(parsed, "EUR", "USD").published_at == day);
+    CHECK(!find(parsed, "EUR", "USD").published_at);
+    CHECK(find(parsed, "EUR", "USD").effective_at == day);
     CHECK(find(parsed, "EUR", "USD").retrieved_at == now);
     CHECK(find(parsed, "EUR", "USD").source_id == ecb.source_id);
     CHECK(ecb.parse("<broken", now).status == rateweaver::ParseStatus::Malformed);

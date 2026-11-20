@@ -48,16 +48,19 @@ struct RefreshResult {
 /// Construction assigns the provider URL, streaming and valid 304 status once.
 /// Keep the client and book alive through every host call; callbacks own only state.
 /// Host calls start/poll serially. cancel/stop may also run concurrently with them.
-/// The clock runs on host/start and native/final threads; its captured resources
-/// must survive native callback drain, and it must not destroy/wait on the client.
+/// The monotonic clock runs on host/start; the UTC clock runs on native/final.
+/// UTC clock captures must survive callback drain, and must not destroy/wait on
+/// the client. Both clocks run outside RateWeaver's mutex.
 /// Destroy the client on its owning host thread, never from a network callback.
 /// See docs/kurlyk-limitations.md for pinned cancellation and buffering constraints.
 class KurlykRefresh final {
 public:
     KurlykRefresh(QuoteBook& book, kurlyk::HttpClient& client, Provider provider,
                   RefreshOptions options = {},
-                  std::function<ts_ms_t()> clock = current_time_ms)
-        : m_state(std::make_shared<State>(book, std::move(provider), options, std::move(clock))),
+                  std::function<ts_ms_t()> utc_clock = current_time_ms,
+                  std::function<ts_ms_t()> monotonic_clock = monotonic_time_ms)
+        : m_state(std::make_shared<State>(book, std::move(provider), options,
+                  std::move(utc_clock), std::move(monotonic_clock))),
           m_client(client) {
         client.set_host(m_state->provider.url);
         client.set_streaming(true);
@@ -78,12 +81,13 @@ public:
             if (state->stopped) return RefreshStatus::Stopped;
             if (state->current) return RefreshStatus::Busy;
             if (state->provider.source_id.empty() || state->provider.url.empty() ||
-                !state->provider.parse || !state->clock || state->options.min_interval_ms < 0 ||
+                !state->provider.parse || !state->utc_clock || !state->monotonic_clock ||
+                state->options.min_interval_ms < 0 ||
                 state->options.max_body_bytes == 0) return RefreshStatus::InvalidOptions;
             state->current = operation;
         }
         ExceptionCleanup cleanup{state, operation};
-        const auto started_at = state->clock();
+        const auto started_tick = state->monotonic_clock();
         kurlyk::Headers headers;
         {
             std::lock_guard<std::mutex> lock(state->mutex);
@@ -91,13 +95,13 @@ public:
                 state->current.reset();
                 return state->stopped ? RefreshStatus::Stopped : RefreshStatus::Cancelled;
             }
-            if (state->last_attempt && (started_at < *state->last_attempt ||
-                static_cast<std::uint64_t>(started_at) - static_cast<std::uint64_t>(*state->last_attempt) <
+            if (state->last_attempt_tick && (started_tick < *state->last_attempt_tick ||
+                static_cast<std::uint64_t>(started_tick) - static_cast<std::uint64_t>(*state->last_attempt_tick) <
                     static_cast<std::uint64_t>(state->options.min_interval_ms))) {
                 state->current.reset();
                 return RefreshStatus::NotDue;
             }
-            state->last_attempt = started_at;
+            state->last_attempt_tick = started_tick;
             operation->etag = state->etag;
             if (!operation->etag.empty()) headers.emplace("If-None-Match", operation->etag);
         }
@@ -256,15 +260,18 @@ private:
         bool processing = false;
     };
     struct State {
-        State(QuoteBook& book_, Provider provider_, RefreshOptions options_, std::function<ts_ms_t()> clock_)
-            : book(book_), provider(std::move(provider_)), options(options_), clock(std::move(clock_)) {}
+        State(QuoteBook& book_, Provider provider_, RefreshOptions options_,
+              std::function<ts_ms_t()> utc_clock_, std::function<ts_ms_t()> monotonic_clock_)
+            : book(book_), provider(std::move(provider_)), options(options_),
+              utc_clock(std::move(utc_clock_)), monotonic_clock(std::move(monotonic_clock_)) {}
         QuoteBook& book;
         const Provider provider;
         const RefreshOptions options;
-        const std::function<ts_ms_t()> clock;
+        const std::function<ts_ms_t()> utc_clock;
+        const std::function<ts_ms_t()> monotonic_clock;
         std::mutex mutex;
         std::shared_ptr<Operation> current;
-        std::optional<ts_ms_t> last_attempt;
+        std::optional<ts_ms_t> last_attempt_tick;
         std::string etag;
         bool stopped = false;
     };
@@ -291,7 +298,7 @@ private:
         // Capture actual completion time, even if the host polls much later.
         // The injected clock is external code and must never run under our lock.
         if (response->ready) {
-            try { retrieved_at = state->clock(); }
+            try { retrieved_at = state->utc_clock(); }
             catch (const std::exception& error) { completion_error = error.what(); }
             catch (...) { completion_error = "Completion clock threw an unknown exception"; }
         }

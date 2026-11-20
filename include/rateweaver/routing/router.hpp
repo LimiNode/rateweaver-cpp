@@ -50,6 +50,19 @@ public:
     explicit RateRouter(const QuoteGraph& graph, RouterOptions options = {})
         : m_graph(graph), m_options(std::move(options)) {}
 
+    /// \brief Reports direct-pair eligibility using this router's quote policies.
+    /// \note This opt-in report does not search alternate routes or explain a
+    ///       multi-hop conversion as a whole. Status distinguishes missing pairs,
+    ///       invalid policy, quorum and consensus; samples retain exclusions.
+    QuotePolicyResult diagnose_pair(std::string_view from, std::string_view to) const {
+        if (!valid_options()) {
+            QuotePolicyResult result;
+            result.aggregation.status = AggregationStatus::InvalidOptions;
+            return result;
+        }
+        return QuotePolicy::select(m_graph, from, to, fixed_time_aggregation(), m_options.quote_policy);
+    }
+
     /// \brief Converts an amount using the shortest acceptable simple path.
     /// \param amount Finite amount to convert; zero and negative values are valid.
     /// \param from Source currency (normalized internally).
