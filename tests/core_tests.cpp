@@ -126,8 +126,7 @@ void graph_contract() {
     CHECK(reverse.size() == 2);
     CHECK(reverse[0].quote.source_id == "a" && reverse[0].reversed);
     CHECK(reverse[1].quote.source_id == "b" && !reverse[1].reversed);
-    QuoteGraph direct(inputs, GraphBuildOptions{false});
-    CHECK(direct.edge_count() == 3);
+    CHECK(reverse[1].quote.rate == 0.4);
     auto reversed_inputs = inputs;
     std::reverse(reversed_inputs.begin(), reversed_inputs.end());
     QuoteGraph permuted(reversed_inputs);
@@ -285,6 +284,85 @@ void policy_contract() {
     CHECK(!QuotePolicy::select(outliers, "USD", "EUR", options, policy));
 }
 
+void last_known_preserves_rejection() {
+    auto options = fresh_options();
+    options.max_relative_deviation = 0.1;
+    QuotePolicyOptions policy;
+    policy.max_last_known_age_ms = 2000;
+
+    // A third, old vote must not turn two conflicting fresh observations
+    // into agreement by moving their median during the fallback attempt.
+    QuoteGraph conflicted(std::vector<Quote>{quote("USD", "EUR", 1, "a"),
+        quote("USD", "EUR", 10, "b"), quote("USD", "EUR", 1, "old", now - 1500)});
+    auto selected = QuotePolicy::select(conflicted, "USD", "EUR", options, policy);
+    CHECK(!selected && selected.aggregation.status == AggregationStatus::NoConsensus);
+    CHECK(!selected.aggregation.rate);
+    CHECK(selected.aggregation.samples[0].exclusion == QuoteExclusionReason::Outlier);
+    CHECK(selected.aggregation.samples[1].exclusion == QuoteExclusionReason::Outlier);
+    CHECK(selected.aggregation.samples[2].exclusion == QuoteExclusionReason::Stale);
+    auto routing = router_options();
+    routing.aggregation = options;
+    routing.quote_policy = policy;
+    const auto conversion = RateRouter(conflicted, routing).convert(1, "USD", "EUR");
+    CHECK(!conversion && !conversion.amount && conversion.status == ConversionStatus::PolicyRejected);
+
+    // A surviving fresh majority may still lack quorum. An old majority
+    // cannot rehabilitate an already rejected fresh outlier in this case.
+    QuoteGraph insufficient(std::vector<Quote>{quote("USD", "EUR", 1, "a"),
+        quote("USD", "EUR", 1, "b"), quote("USD", "EUR", 10, "c"),
+        quote("USD", "EUR", 10, "old-a", now - 1500),
+        quote("USD", "EUR", 10, "old-b", now - 1500),
+        quote("USD", "EUR", 10, "old-c", now - 1500)});
+    options.min_sources = 3;
+    selected = QuotePolicy::select(insufficient, "USD", "EUR", options, policy);
+    CHECK(!selected && selected.aggregation.status == AggregationStatus::InsufficientSources);
+    CHECK(selected.aggregation.samples[2].exclusion == QuoteExclusionReason::Outlier);
+    CHECK(selected.aggregation.samples[3].exclusion == QuoteExclusionReason::Stale);
+
+    // An age-only quorum shortage is recoverable, preserving each input's
+    // independent origin, usage and timestamps while all other rules hold.
+    QuoteGraph recoverable(std::vector<Quote>{quote("USD", "EUR", 2, "fresh"),
+        quote("USD", "EUR", 2, "old", now - 2000)});
+    options.min_sources = 2;
+    selected = QuotePolicy::select(recoverable, "USD", "EUR", options, policy);
+    CHECK(selected && selected.aggregation.eligible_sources == 2);
+    CHECK(selected.usage[0] == QuoteUsage::Normal && selected.usage[1] == QuoteUsage::LastKnownFallback);
+    CHECK(selected.aggregation.samples[1].edge.quote.origin == QuoteOrigin::Observed);
+    CHECK(selected.aggregation.samples[1].edge.quote.published_at == now - 2000);
+    CHECK(selected.aggregation.samples[1].edge.quote.retrieved_at == now);
+    options.disabled_sources.insert("old");
+    selected = QuotePolicy::select(recoverable, "USD", "EUR", options, policy);
+    CHECK(!selected && selected.aggregation.samples[1].exclusion == QuoteExclusionReason::SourceDisabled);
+    options.disabled_sources.clear();
+    options.min_sources = 3;
+    CHECK(!QuotePolicy::select(recoverable, "USD", "EUR", options, policy));
+    options.min_sources = 2;
+    policy.max_last_known_age_ms = 1999;
+    selected = QuotePolicy::select(recoverable, "USD", "EUR", options, policy);
+    CHECK(!selected && selected.aggregation.samples[1].exclusion == QuoteExclusionReason::Stale);
+    policy.max_last_known_age_ms = 2000;
+
+    QuoteGraph future(std::vector<Quote>{quote("USD", "EUR", 2, "fresh", now + 1),
+        quote("USD", "EUR", 2, "old", now - 1500)});
+    selected = QuotePolicy::select(future, "USD", "EUR", options, policy);
+    CHECK(!selected && selected.aggregation.samples[0].exclusion == QuoteExclusionReason::FutureTimestamp);
+    options.max_future_skew_ms = 1;
+    selected = QuotePolicy::select(future, "USD", "EUR", options, policy);
+    CHECK(selected && selected.usage[0] == QuoteUsage::Normal && selected.usage[1] == QuoteUsage::LastKnownFallback);
+
+    // Newly admitted old observations still undergo the same outlier filter.
+    QuoteGraph old_outlier(std::vector<Quote>{quote("USD", "EUR", 2, "fresh"),
+        quote("USD", "EUR", 2, "old", now - 1500),
+        quote("USD", "EUR", 20, "old-outlier", now - 1500)});
+    options = fresh_options();
+    options.min_sources = 2;
+    options.max_relative_deviation = 0.1;
+    selected = QuotePolicy::select(old_outlier, "USD", "EUR", options, policy);
+    CHECK(selected && selected.aggregation.samples[2].exclusion == QuoteExclusionReason::Outlier);
+    CHECK(!selected.aggregation.samples[2].contributed);
+    CHECK(selected.usage[0] == QuoteUsage::Normal && selected.usage[1] == QuoteUsage::LastKnownFallback);
+}
+
 void routing_contract() {
     QuoteGraph graph(std::vector<Quote>{quote("USD", "EUR", 2), quote("EUR", "GBP", 3),
         quote("USD", "AUD", 4), quote("AUD", "GBP", 5)});
@@ -388,6 +466,7 @@ int main() {
         aggregation_contract();
         freshness_contract();
         policy_contract();
+        last_known_preserves_rejection();
         routing_contract();
         concurrent_publication();
         std::cout << "core: " << checks << " checks passed\n";

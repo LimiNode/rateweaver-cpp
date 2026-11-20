@@ -1,4 +1,4 @@
-#include <rateweaver/runtime.hpp>
+#include <rateweaver/providers/common.hpp>
 #if RATEWEAVER_TEST_JSON
 #include <rateweaver/providers.hpp>
 #endif
@@ -136,146 +136,6 @@ void ecb_provider() {
 }
 #endif
 
-class FakeTransport final : public rateweaver::HttpTransport {
-public:
-    std::function<rateweaver::HttpResponse(const rateweaver::HttpRequest&, const rateweaver::CancellationToken&)> action;
-    std::atomic<int> calls{0};
-    rateweaver::HttpResponse get(const rateweaver::HttpRequest& request, const rateweaver::CancellationToken& token) override {
-        ++calls;
-        return action(request, token);
-    }
-};
-
-rateweaver::Provider test_provider() {
-    return {"test", "https://example.invalid/rates",
-        [](std::string_view body, rateweaver::ts_ms_t retrieved) {
-            rateweaver::ParseResult parsed;
-            if (body == "throw") throw std::runtime_error("parser failure");
-            if (body == "empty") { parsed.status = rateweaver::ParseStatus::NoData; return parsed; }
-            if (body != "valid" && body != "partial") return parsed;
-            parsed.status = body == "partial" ? rateweaver::ParseStatus::Partial : rateweaver::ParseStatus::Success;
-            parsed.rejected_entries = body == "partial" ? 1 : 0;
-            parsed.quotes.emplace_back("EUR", "USD", 1.25, "test", rateweaver::QuoteOrigin::Observed, day, retrieved);
-            return parsed;
-        }};
-}
-
-rateweaver::HttpResponse response(std::string body = "valid", int code = 200) {
-    rateweaver::HttpResponse result;
-    result.status_code = code;
-    result.body = std::move(body);
-    result.etag = "version-1";
-    return result;
-}
-
-void refresh_workflow() {
-    rateweaver::QuoteBook book;
-    FakeTransport transport;
-    rateweaver::RefreshOptions options;
-    options.min_interval_ms = 10;
-    options.max_body_bytes = 100;
-    rateweaver::ts_ms_t clock = now;
-    rateweaver::RefreshController refresh(book, transport, test_provider(), options, [&] { return clock; });
-    const auto attempt_at = [&](rateweaver::ts_ms_t time) { clock = time; return refresh.refresh(); };
-    transport.action = [&](const auto& request, const auto&) {
-        CHECK(request.timeout_ms == options.timeout_ms);
-        CHECK(request.max_body_bytes == 100);
-        CHECK(request.if_none_match.empty());
-        clock = now + 5;
-        return response();
-    };
-    CHECK(attempt_at(now).status == rateweaver::RefreshStatus::Updated);
-    const auto snapshot = book.snapshot();
-    CHECK(snapshot.revision == 1);
-    CHECK(snapshot.quotes.front().retrieved_at == now + 5);
-    CHECK(attempt_at(now + 1).status == rateweaver::RefreshStatus::NotDue);
-    CHECK(attempt_at(now - 1).status == rateweaver::RefreshStatus::NotDue);
-    CHECK(transport.calls == 1);
-    transport.action = [](const auto& request, const auto&) {
-        CHECK(request.if_none_match == "version-1");
-        return response("", 304);
-    };
-    CHECK(attempt_at(now + 10).status == rateweaver::RefreshStatus::NotModified);
-    CHECK(book.snapshot().revision == 1);
-    CHECK(book.snapshot().quotes.front().retrieved_at == now + 5);
-    int attempt = 20;
-    for (const auto& item : std::vector<std::pair<std::string, rateweaver::RefreshStatus>>{
-            {"broken", rateweaver::RefreshStatus::ParseError},
-            {"empty", rateweaver::RefreshStatus::NoData},
-            {"partial", rateweaver::RefreshStatus::PartialData},
-            {"throw", rateweaver::RefreshStatus::ParseError}}) {
-        transport.action = [&](const auto&, const auto&) { return response(item.first); };
-        CHECK(attempt_at(now + attempt).status == item.second);
-        CHECK(book.snapshot().revision == 1);
-        CHECK(attempt_at(now + attempt + 1).status == rateweaver::RefreshStatus::NotDue);
-        attempt += 10;
-    }
-    transport.action = [](const auto&, const auto&) { auto r = response(); r.error = rateweaver::TransportError::Timeout; return r; };
-    CHECK(attempt_at(now + attempt).status == rateweaver::RefreshStatus::Timeout);
-    attempt += 10;
-    transport.action = [](const auto&, const auto&) -> rateweaver::HttpResponse { throw std::runtime_error("network"); };
-    CHECK(attempt_at(now + attempt).status == rateweaver::RefreshStatus::NetworkError);
-    attempt += 10;
-    transport.action = [](const auto&, const auto&) { return response("", 503); };
-    CHECK(attempt_at(now + attempt).status == rateweaver::RefreshStatus::HttpError);
-    attempt += 10;
-    transport.action = [](const auto&, const auto&) { return response(std::string(101, 'x')); };
-    CHECK(attempt_at(now + attempt).status == rateweaver::RefreshStatus::ResponseTooLarge);
-    attempt += 10;
-    transport.action = [&](const auto&, const auto& token) { refresh.cancel(); CHECK(token.is_cancelled()); return response(); };
-    CHECK(attempt_at(now + attempt).status == rateweaver::RefreshStatus::Cancelled);
-    CHECK(book.snapshot().revision == 1);
-    attempt += 10;
-    transport.action = [](const auto&, const auto&) { return response(); };
-    CHECK(attempt_at(now + attempt).status == rateweaver::RefreshStatus::Updated);
-    CHECK(book.snapshot().revision == 2);
-    refresh.stop();
-    CHECK(attempt_at(now + attempt + 10).status == rateweaver::RefreshStatus::Stopped);
-}
-
-void cancellation_and_overlap() {
-    rateweaver::QuoteBook book;
-    FakeTransport transport;
-    std::promise<void> entered, released;
-    auto release = released.get_future().share();
-    auto entered_future = entered.get_future();
-    transport.action = [&](const auto&, const auto&) { entered.set_value(); release.wait(); return response(); };
-    rateweaver::RefreshController controller(book, transport, test_provider(), {}, [] { return now; });
-    rateweaver::RefreshResult result;
-    std::thread worker([&] { result = controller.refresh(); });
-    entered_future.wait();
-    const auto overlapping = controller.refresh();
-    controller.stop();
-    released.set_value();
-    worker.join();
-    CHECK(overlapping.status == rateweaver::RefreshStatus::Busy);
-    CHECK(result.status == rateweaver::RefreshStatus::Cancelled || result.status == rateweaver::RefreshStatus::Stopped);
-    CHECK(book.snapshot().quotes.empty());
-    CHECK(controller.refresh().status == rateweaver::RefreshStatus::Stopped);
-}
-
-#if RATEWEAVER_TEST_JSON || RATEWEAVER_TEST_ECB
-void feed_publication(const rateweaver::Provider& provider, const std::string& body) {
-    rateweaver::QuoteBook book;
-    FakeTransport transport;
-    rateweaver::RefreshOptions options;
-    options.min_interval_ms = 0;
-    rateweaver::RefreshController controller(book, transport, provider, options, [] { return now; });
-    transport.action = [&](const auto&, const auto&) { return response(body); };
-    CHECK(controller.refresh().status == rateweaver::RefreshStatus::Updated);
-    CHECK(book.snapshot_source(provider.source_id).revision == 1);
-    CHECK(!book.snapshot_source(provider.source_id).quotes.empty());
-    transport.action = [](const auto&, const auto&) { return response("<malformed"); };
-    CHECK(controller.refresh().status == rateweaver::RefreshStatus::ParseError);
-    CHECK(book.snapshot().revision == 1);
-    transport.action = [](const auto&, const auto&) { auto r = response(); r.error = rateweaver::TransportError::Timeout; return r; };
-    CHECK(controller.refresh().status == rateweaver::RefreshStatus::Timeout);
-    CHECK(book.snapshot().revision == 1);
-    transport.action = [](const auto&, const auto&) { auto r = response(); r.error = rateweaver::TransportError::Network; return r; };
-    CHECK(controller.refresh().status == rateweaver::RefreshStatus::NetworkError);
-    CHECK(book.snapshot().revision == 1);
-}
-#endif
 }
 
 int main() {
@@ -283,16 +143,11 @@ int main() {
         timestamps();
 #if RATEWEAVER_TEST_JSON
         json_providers();
-        feed_publication(rateweaver::cdn_provider(), fixture("cdn.json"));
-        feed_publication(rateweaver::cbr_provider(), fixture("cbr.json"));
 #endif
 #if RATEWEAVER_TEST_ECB
         ecb_provider();
-        feed_publication(rateweaver::ecb_provider(), fixture("ecb.xml"));
 #endif
-        refresh_workflow();
-        cancellation_and_overlap();
-        std::cout << "providers/runtime: " << checks << " checks passed\n";
+        std::cout << "providers: " << checks << " checks passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

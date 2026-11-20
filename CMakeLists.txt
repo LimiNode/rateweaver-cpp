@@ -13,6 +13,9 @@ option(RATEWEAVER_BUILD_TESTS "Build deterministic offline tests" ${RATEWEAVER_I
 option(RATEWEAVER_BUILD_EXAMPLES "Build the offline conversion example" OFF)
 option(RATEWEAVER_BUILD_PROVIDERS "Enable JSON rate providers" OFF)
 option(RATEWEAVER_ENABLE_ECB "Enable the optional ECB XML provider" OFF)
+option(RATEWEAVER_ENABLE_KURLYK "Enable native asynchronous kurlyk refresh" OFF)
+option(RATEWEAVER_BUILD_LIVE_SMOKE "Build and register opt-in live HTTPS provider smoke" OFF)
+set(RATEWEAVER_LIVE_CA_FILE "" CACHE FILEPATH "Optional CA bundle for the opt-in HTTPS smoke")
 option(RATEWEAVER_INSTALL "Generate install rules and CMake package" ON)
 
 find_package(Threads REQUIRED)
@@ -45,6 +48,16 @@ if(RATEWEAVER_ENABLE_ECB)
     target_link_libraries(rateweaver_ecb INTERFACE rateweaver::rateweaver pugixml::pugixml)
 endif()
 
+if(RATEWEAVER_ENABLE_KURLYK)
+    include(cmake/rateweaverKurlykDependency.cmake)
+    rateweaver_resolve_kurlyk(TRUE)
+    add_library(rateweaver_kurlyk INTERFACE)
+    add_library(rateweaver::kurlyk ALIAS rateweaver_kurlyk)
+    set_target_properties(rateweaver_kurlyk PROPERTIES EXPORT_NAME kurlyk)
+    target_link_libraries(rateweaver_kurlyk INTERFACE
+        rateweaver::rateweaver rateweaver_deps::kurlyk)
+endif()
+
 if(RATEWEAVER_INSTALL)
     set(RATEWEAVER_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/rateweaver")
     install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
@@ -62,6 +75,13 @@ if(RATEWEAVER_INSTALL)
         install(EXPORT rateweaverEcbTargets NAMESPACE rateweaver::
             DESTINATION "${RATEWEAVER_CMAKE_INSTALL_DIR}")
     endif()
+    if(RATEWEAVER_ENABLE_KURLYK)
+        install(TARGETS rateweaver_kurlyk EXPORT rateweaverKurlykTargets)
+        install(EXPORT rateweaverKurlykTargets NAMESPACE rateweaver::
+            DESTINATION "${RATEWEAVER_CMAKE_INSTALL_DIR}")
+        install(FILES cmake/rateweaverKurlykDependency.cmake
+            DESTINATION "${RATEWEAVER_CMAKE_INSTALL_DIR}")
+    endif()
     configure_package_config_file(cmake/rateweaverConfig.cmake.in
         "${CMAKE_CURRENT_BINARY_DIR}/rateweaverConfig.cmake"
         INSTALL_DESTINATION "${RATEWEAVER_CMAKE_INSTALL_DIR}")
@@ -70,6 +90,19 @@ if(RATEWEAVER_INSTALL)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/rateweaverConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/rateweaverConfigVersion.cmake"
         DESTINATION "${RATEWEAVER_CMAKE_INSTALL_DIR}")
+endif()
+if(RATEWEAVER_BUILD_LIVE_SMOKE)
+    if(NOT RATEWEAVER_ENABLE_KURLYK OR NOT RATEWEAVER_BUILD_PROVIDERS OR NOT RATEWEAVER_ENABLE_ECB)
+        message(FATAL_ERROR "Live smoke requires RATEWEAVER_ENABLE_KURLYK, RATEWEAVER_BUILD_PROVIDERS and RATEWEAVER_ENABLE_ECB")
+    endif()
+    add_executable(rateweaver_live_providers examples/live_providers.cpp)
+    target_link_libraries(rateweaver_live_providers PRIVATE
+        rateweaver::kurlyk rateweaver::providers rateweaver::ecb)
+    target_compile_definitions(rateweaver_live_providers PRIVATE
+        KURLYK_AUTO_INIT=0 KURLYK_WEBSOCKET_SUPPORT=0 KURLYK_AUTH_SUPPORT=0 KURLYK_OAUTH_SUPPORT=0)
+    enable_testing()
+    add_test(NAME rateweaver_live_providers COMMAND rateweaver_live_providers "${RATEWEAVER_LIVE_CA_FILE}")
+    set_tests_properties(rateweaver_live_providers PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 LABELS live)
 endif()
 
 if(RATEWEAVER_BUILD_TESTS)

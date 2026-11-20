@@ -25,11 +25,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NewYaroslav/kurlyk
+          ref: fe2698dec259a7e417883e1f41985ed21ec28b55
+          path: tmp/agent-work/deps/kurlyk
       - name: Install optional parser dependencies
-        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev libpugixml-dev
+        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev libpugixml-dev libcurl4-openssl-dev python3
       - name: Configure Release providers
-        run: cmake -S . -B tmp/agent-work/ci -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON
-      - name: Build and test offline providers
+        run: cmake -S . -B tmp/agent-work/ci -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON -DRATEWEAVER_KURLYK_INCLUDE_DIR="${{ github.workspace }}/tmp/agent-work/deps/kurlyk/include"
+      - name: Build and test providers and native loopback HTTP
         run: cmake --build tmp/agent-work/ci --parallel 2 && ctest --test-dir tmp/agent-work/ci --output-on-failure
 
   mingw:
@@ -39,12 +44,37 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NewYaroslav/kurlyk
+          ref: fe2698dec259a7e417883e1f41985ed21ec28b55
+          path: tmp/agent-work/deps/kurlyk
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-nlohmann-json mingw-w64-x86_64-pugixml
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-nlohmann-json mingw-w64-x86_64-pugixml mingw-w64-x86_64-curl mingw-w64-x86_64-python
       - name: Configure Release
-        run: cmake -S . -B tmp/agent-work/ci -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON
+        run: cmake -S . -B tmp/agent-work/ci -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON -DRATEWEAVER_KURLYK_INCLUDE_DIR="${{ github.workspace }}/tmp/agent-work/deps/kurlyk/include"
       - name: Build and test
         run: cmake --build tmp/agent-work/ci --parallel 2 && ctest --test-dir tmp/agent-work/ci --output-on-failure
+
+  native-msvc:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: NewYaroslav/kurlyk
+          ref: fe2698dec259a7e417883e1f41985ed21ec28b55
+          path: tmp/agent-work/deps/kurlyk
+      - name: Install native test dependencies
+        run: vcpkg install curl:x64-windows nlohmann-json:x64-windows pugixml:x64-windows
+      - name: Configure Release native HTTP
+        run: cmake -S . -B tmp/agent-work/ci -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -DCURL_INCLUDE_DIR="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/include" -DCURL_LIBRARY_RELEASE="$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/libcurl.lib" -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON -DRATEWEAVER_KURLYK_INCLUDE_DIR="${{ github.workspace }}/tmp/agent-work/deps/kurlyk/include"
+      - name: Build Release
+        run: cmake --build tmp/agent-work/ci --config Release --parallel 2
+      - name: Test native HTTP and installed consumers
+        run: |
+          $env:PATH = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin;$env:PATH"
+          ctest --test-dir tmp/agent-work/ci -C Release --output-on-failure

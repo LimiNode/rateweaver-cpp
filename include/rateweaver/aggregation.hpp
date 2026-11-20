@@ -3,5 +3,6 @@
 /// \file aggregation.hpp
 /// \brief Umbrella header for quote aggregation and source selection.
 
-#include "graph.hpp"
+#include "core.hpp"
 #include "aggregation/aggregator.hpp"
+#include "aggregation/quote_policy.hpp"

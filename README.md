@@ -103,6 +103,8 @@ then builds that consumer with optional dependency discovery disabled.
 | `RATEWEAVER_BUILD_EXAMPLES` | Off | Offline conversion example |
 | `RATEWEAVER_BUILD_PROVIDERS` | Off | CDN/CBR JSON adapters; `rateweaver::providers` |
 | `RATEWEAVER_ENABLE_ECB` | Off | ECB XML adapter; `rateweaver::ecb` |
+| `RATEWEAVER_ENABLE_KURLYK` | Off | Native asynchronous refresh; `rateweaver::kurlyk` |
+| `RATEWEAVER_BUILD_LIVE_SMOKE` | Off | Opt-in HTTPS smoke against the three public feeds |
 | `RATEWEAVER_INSTALL` | On | Headers and exported CMake package |
 
 Optional installed targets require components:
@@ -119,10 +121,18 @@ daily XML feed and `pugixml >= 1.13`. Provide CMake packages or existing
 namespaced targets. Core-only consumers need neither dependency. The core
 umbrella excludes optional provider dependencies.
 
-The host owns transport and calls refresh manually or from its timer. There is
-no mandatory global HTTP runtime, worker or scheduler. Requests carry bounded
-time/body limits and cancellation state, which transports must honor. A host
-can bridge its existing `kurlyk` runtime without creating a second runtime.
+The optional `KurlykRefresh` uses a dedicated, long-lived `kurlyk::HttpClient`.
+The host configures native timeouts, retries and owned/shared rate limits once.
+`start()` submits asynchronously; `poll()` parses a ready result and publishes
+on the host thread. RateWeaver creates no worker, scheduler or global runtime.
+MGC reuses its existing kurlyk runtime.
+
+The audited MGC kurlyk pin buffers bodies before streaming callbacks, exposes
+client cancellation as a waiting barrier, and has group-accounting concurrency
+defects. RateWeaver fences obsolete publication immediately, but a hard receive
+memory cap, nonwaiting I/O cancellation and safe native group accounting require
+a separate kurlyk change.
+See the [exact-pin audit](docs/kurlyk-limitations.md) before deployment.
 
 Parsing and publication are separate. Empty, malformed, cancelled or failed
 responses retain the last valid source snapshot. Partial data are diagnosed

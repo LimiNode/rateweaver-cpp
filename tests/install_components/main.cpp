@@ -4,8 +4,25 @@
 #if CONSUME_ECB
 #include <rateweaver/providers/ecb.hpp>
 #endif
+#if CONSUME_KURLYK
+#include <rateweaver/runtime/kurlyk_refresh.hpp>
+#endif
 
 int main() {
+#if CONSUME_KURLYK
+    kurlyk::init(false);
+    {
+        rateweaver::QuoteBook book;
+        kurlyk::HttpClient client;
+        rateweaver::Provider provider;
+        provider.source_id = "installed";
+        provider.url = "http://127.0.0.1/";
+        rateweaver::KurlykRefresh refresh(book, client, provider);
+        refresh.stop();
+        if (refresh.start() != rateweaver::RefreshStatus::Stopped) return 4;
+    }
+    kurlyk::deinit();
+#endif
 #if CONSUME_JSON
     const auto cdn = rateweaver::cdn_provider().parse(
         R"({"date":"2024-01-02","usd":{"eur":0.8}})", 1704153600100LL);

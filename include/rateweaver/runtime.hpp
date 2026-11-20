@@ -1,4 +1,3 @@
 #pragma once
 
-#include <rateweaver/runtime/transport.hpp>
-#include <rateweaver/runtime/refresh.hpp>
+#include <rateweaver/runtime/kurlyk_refresh.hpp>

@@ -1,107 +1,151 @@
-# Providers and host-owned refresh
+# Providers and native asynchronous refresh
 
-The provider layer normalizes feed responses into `Quote` values. A `Provider`
-holds a source ID, URL and parsing function. `ParseResult` distinguishes complete,
-partial, empty and malformed data and owns its quotes. Parsing does not publish,
-start a network runtime or expose JSON/XML through the core conversion API.
+A `Provider` holds a source ID, URL and parsing function. Parsing owns its
+normalized quotes and distinguishes complete, partial, empty and malformed
+responses. It has no dependency on kurlyk or HTTP lifecycle.
 
 | Factory | Data and endpoint | Source timestamp |
 | --- | --- | --- |
 | `cdn_provider("USD")` | Fawaz Ahmed Currency API, `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json` | Feed `date`, day resolution |
-| `cbr_provider()` | `https://www.cbr-xml-daily.ru/daily_json.js`, a third-party redistribution of Bank of Russia rates, not an official CBR JSON endpoint | Feed `Date`, with its explicit UTC offset |
+| `cbr_provider()` | `https://www.cbr-xml-daily.ru/daily_json.js`, third-party redistribution of Bank of Russia rates | Feed `Date`, explicit UTC offset |
 | `ecb_provider()` | Official ECB `https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml` | Daily `Cube time`, day resolution |
 
-CDN rates are units per selected base. CBR quotes are foreign currency to RUB,
-using `Value / Nominal`; a 100-unit nominal is not a one-unit rate. ECB quotes
-are EUR to foreign currency. The graph can derive reciprocals without inventing
-an additional independent observation.
+CDN quotes units per base. CBR quotes foreign currency to RUB using
+`Value / Nominal`; ECB quotes EUR to foreign currency. The Core graph derives
+reciprocals unless a source supplies an explicit reverse observation. CDN/ECB
+dates map conservatively to UTC midnight; they do not assert an exact release
+instant. CBR's timestamp preserves its stated offset. Retrieval time never
+substitutes for the source timestamp merely to make old data fresh.
 
-CDN and ECB provide a calendar date rather than an exact release instant. It is
-encoded as UTC midnight in `published_at` for conservative age calculation.
-This is a source timestamp with day precision, not a claim that publication
-occurred at midnight. CBR's timestamp is converted from its stated offset;
-naive local timestamps are rejected. `retrieved_at` is supplied separately and
-must never replace the source timestamp merely to pass freshness filtering.
+## Persistent client and host polling
 
-## Using the adapters
+JSON adapters require `rateweaver::providers`; ECB independently requires
+`rateweaver::ecb`. Native refresh requires the optional `rateweaver::kurlyk`
+component and a host-supplied kurlyk dependency. Core needs none of them.
 
-JSON factories are available through `<rateweaver/providers.hpp>` and require
-`rateweaver::providers`. ECB is included separately through
-`<rateweaver/providers/ecb.hpp>` and requires `rateweaver::ecb`. It can be used
-without enabling JSON providers. The common provider and runtime interfaces
-need only core and the standard library.
+For a standalone HTTP-only application using the external-header/CURL fallback:
+
+```cmake
+find_package(rateweaver CONFIG REQUIRED COMPONENTS providers kurlyk)
+target_link_libraries(my_app PRIVATE rateweaver::providers rateweaver::kurlyk)
+target_compile_definitions(my_app PRIVATE
+    KURLYK_AUTO_INIT=0 KURLYK_WEBSOCKET_SUPPORT=0
+    KURLYK_AUTH_SUPPORT=0 KURLYK_OAUTH_SUPPORT=0)
+```
+
+The fallback resolves HTTP dependencies only. An embedded host with WebSocket
+or authentication features reuses its existing kurlyk target, feature macros
+and dependencies instead. RateWeaver does not override them globally. Start
+the host runtime before constructing native clients.
 
 ```cpp
 #include <rateweaver/providers.hpp>
 #include <rateweaver/runtime.hpp>
 
-// book and transport are owned by the embedding host and outlive controller.
+// The host has already started its one kurlyk runtime.
+rateweaver::QuoteBook book;
+kurlyk::HttpClient client;
+client.set_timeout(5);                 // native seconds
+client.set_connect_timeout(3);
+client.set_retry_attempts(2, 250);      // native semantics
+client.set_headers({{"Accept", "application/json"}});
+client.set_rate_limit(2, 1000);         // configure once, persists across refresh
+
 rateweaver::RefreshOptions options;
-options.min_interval_ms = 60000;
-options.timeout_ms = 5000;
-options.max_body_bytes = 1024 * 1024;
-rateweaver::RefreshController controller(book, transport,
+options.min_interval_ms = 60000;       // feed cadence, not an HTTP rate limiter
+rateweaver::KurlykRefresh refresh(book, client,
     rateweaver::cdn_provider("USD"), options);
 
-const auto refresh = controller.refresh();
-if (refresh.status == rateweaver::RefreshStatus::Updated) {
-    const rateweaver::QuoteGraph graph(book.snapshot());
-    // Convert using an explicit host freshness policy and this immutable graph.
+// From the host event loop/timer:
+const auto started = refresh.start(); // Started, NotDue, Busy, etc.
+if (const auto result = refresh.poll()) {
+    if (result->status == rateweaver::RefreshStatus::ResponseTooLarge) {
+        // Native cancellation barrier on the host thread; see limitations below.
+        client.cancel_requests();
+    }
+    // Updated means the complete source snapshot was atomically replaced.
 }
+
+// Host shutdown order, outside any callback or RateWeaver lock:
+refresh.stop();                        // immediate publication fence
+client.cancel_requests();             // native cancellation callback barrier
+// Destroy refresh/client before the host stops its global kurlyk runtime.
 ```
 
-Keep one controller per source so its interval, ETag and overlap gate remain
-effective. Different sources can publish concurrently through `QuoteBook`.
-Do not publish the same source independently behind its controller. There is
-no process-global source registry or mandatory thread. A host timer can call the
-same `refresh()` method; it returns `NotDue` before starting an early retry.
-Failures also consume the interval, and a backward clock does not trigger a
-tight request loop. Tests inject a deterministic clock; production defaults to
-`current_time_ms()`. A fresh clock sample after HTTP success supplies retrieval
-completion time. Clock exceptions propagate after releasing the overlap gate.
+The host repeats `poll()` while work is pending. It can use kurlyk's manual
+`init(false)` plus `process()` event loop instead of a native worker; RateWeaver
+does not call either. All translation units must share the host's kurlyk feature
+and startup macros. Construction assigns the provider URL, enables streaming
+and adds valid HTTP 304 once; configure other native defaults beforehand.
+Use a dedicated client per source identity and do not mutate it concurrently.
 
-## Transport and cancellation
+With manual kurlyk processing, keep pumping until requests drain before invoking
+a native waiting barrier or destroying a busy client. A barrier cannot progress
+on the same thread while that thread has stopped calling `process()`.
 
-Implement `HttpTransport::get(HttpRequest, CancellationToken)` using the host's
-HTTP facility. The request carries URL, total timeout, maximum response bytes
-and optional `If-None-Match`. Return explicit network, timeout or cancellation
-errors. Enforce body limits while receiving and cancellation/deadline checks
-throughout the request. Returned bodies are checked again by the controller.
-The controller cannot forcibly interrupt an uncooperative blocking transport.
+One refresh object controls one source's interval, ETag and publication gate.
+Do not independently publish the same source or share that client with another
+provider. Different clients can publish concurrently into one QuoteBook. To
+share an upstream's physical request limit, assign the same native
+`HttpRateLimitHandlePtr` to each client. RateWeaver has no rate counter or HTTP
+queue. Failures consume the refresh interval; a backward clock returns NotDue.
 
-A host with an existing `kurlyk` runtime can implement this interface using its
-current request/cancellation ownership. This foundation does not ship or test a
-concrete `kurlyk` bridge, initialize a second runtime, or vendor another HTTP
-dependency. TLS verification, redirects and transport resource cleanup remain
-the host transport's responsibility. No live HTTP interoperability is claimed
-by the offline fixture tests.
+`start()` and `poll()` are host-serialized. `cancel()` and `stop()` can run
+concurrently with them. Parsing and clock calls run outside the state mutex and
+may re-enter cancel/stop. The injected clock must be thread-safe: start samples
+it on the host; final completion samples it on the native callback thread.
+Its captured resources must survive native callback drain, including callbacks
+after cancellation/destruction. It must not destroy the client or call its
+cancellation barrier from that callback. The default clock owns no host state.
+Publication checks the operation fence after parsing.
+There is no user completion callback on the network worker; the host handles
+the returned result without a RateWeaver lock.
 
-Only one call per controller may be active; overlapping calls return `Busy`.
-Transport, parser and clock callbacks run outside its mutex. `cancel()` signals
-the current operation and permits a later due retry. `stop()` is terminal and
-serializes with publication so a late response cannot publish after stop.
-It signals cancellation and returns without waiting. Keep controller, book and
-transport alive until every synchronous call returns; stop and drain the
-host's executor before destroying them. No controller-owned worker needs joining.
+## Lifetime, cancellation and response size
 
-## Publication and failures
+Native callbacks capture owned state, never the refresh object, client or book.
+Destroying the refresh fences publication and leaves pending callbacks safe.
+The book/client must outlive host calls that use them. Destroy the native client
+on its host thread; its destructor can wait for cancellation callbacks. Do not
+destroy it or invoke its cancellation barrier from its network callback.
 
-Only a complete, nonempty, structurally valid batch publishes by default.
-Network/HTTP errors, timeouts, cancellation, oversized responses, malformed
-data and no-data responses preserve the previous source snapshot and revision.
-Partial responses report retained valid quotes and rejected-entry counts but
-do not publish unless `accept_partial` is explicitly enabled. Enabling it
-authorizes replacement by a subset; it does not merge entries into an older
-snapshot.
+`cancel()` fences this attempt and allows a new attempt after its final callback
+has drained through `poll()`. `stop()` is terminal. Neither waits for HTTP nor
+claims to abort native I/O. Use the host's native client cancellation barrier
+when required. The gate remains Busy until final completion, preventing an
+obsolete response from racing a replacement attempt. ETag stays with the fixed
+source identity.
 
-A successful publication records its ETag for later conditional requests.
-An expected `304` returns `NotModified` and leaves all quote times and the book
-revision unchanged. An unsolicited `304` is an HTTP error. Feed validation is
-independent of routing freshness: a stored observation can subsequently be
-rejected as old or future-dated by the conversion policy.
+`max_body_bytes` bounds accepted data and streamed byte accounting. A detected
+overflow returns ResponseTooLarge early; after the host cancels native I/O,
+continue polling to drain the final callback before restarting. Final content
+already includes all chunks and is never duplicated. Retry notifications never
+publish. The pinned client retries only before the first streaming chunk.
 
-The fixtures under `tests/fixtures/` are deterministic representative responses;
-tests also construct malformed/empty/partial variants. They establish parser,
-normalization, provenance and failure-publication behavior. Historical lookup,
-background scheduling and production HTTP runtime ownership are intentionally
-outside this library layer.
+**The pinned kurlyk buffers internally before the streaming callback. This is
+not a hard receive-memory ceiling.** The [pinned API audit and upstream
+proposal](kurlyk-limitations.md) explains the missing cancellation identity and
+pre-append abort API. Full network acceptance remains gated on that review.
+
+## Publication
+
+Only a complete, nonempty, validated batch publishes by default. HTTP/network
+failure, timeout, cancellation, oversized response, malformed data and no data
+preserve the old quotes and revision. Partial results preserve them too unless
+`accept_partial` explicitly permits replacing a snapshot with the valid subset.
+QuoteBook still checks source ownership and batch validity before committing.
+
+A successful publication saves its ETag. An expected 304 returns NotModified
+without changing revision or quote timestamps; an unsolicited 304 is an error.
+The completion clock supplies retrieval time in the final native callback;
+delayed host polling cannot change it. Feed parsing does not override routing age/skew,
+source/quorum or LastKnown policy. Daily current snapshots are not historical
+storage.
+
+The opt-in [live example](../examples/live_providers.cpp) prints HTTP/refresh
+status, quote count, source/retrieval time, revision, both conversion directions
+and contributors. Its external-network unavailability exit code is 77 (SKIP).
+If a feed already announces a future effective date (possible for CBR), it
+requires rejection of current valuation, then labels a separate routing check
+at the feed timestamp. That check does not authorize current use of future data.
+Mandatory tests use a local HTTP server and deterministic fixtures.

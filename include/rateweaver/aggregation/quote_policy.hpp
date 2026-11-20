@@ -19,6 +19,8 @@ struct QuotePolicyOptions {
     /// \note Requires aggregation.max_age_ms and must be at least that age.
     ///       The default disables fallback. Quorum, source and outlier rules
     ///       remain in force; missing and future timestamps are never repaired.
+    ///       NoConsensus and fresh outlier refusals are final. Only an age-based
+    ///       eligibility or quorum shortage can trigger another aggregation.
     std::optional<ts_ms_t> max_last_known_age_ms;
 };
 
@@ -53,12 +55,18 @@ public:
         result.aggregation = RateAggregator::aggregate(graph, from, to, aggregation);
         result.usage.resize(result.aggregation.samples.size(), QuoteUsage::Normal);
         if (result || !policy.max_last_known_age_ms ||
-            result.aggregation.status == AggregationStatus::InvalidOptions ||
-            result.aggregation.status == AggregationStatus::InvalidPair ||
-            result.aggregation.status == AggregationStatus::NoQuotes ||
-            result.aggregation.status == AggregationStatus::ArithmeticError) {
+            (result.aggregation.status != AggregationStatus::NoEligibleQuotes &&
+             result.aggregation.status != AggregationStatus::InsufficientSources)) {
             return result;
         }
+        // LastKnown relaxes only age. Never rehabilitate an outlier rejected
+        // by the fresh cohort by changing its median with old observations.
+        bool has_stale = false;
+        for (const auto& sample : result.aggregation.samples) {
+            if (sample.exclusion == QuoteExclusionReason::Outlier) return result;
+            if (sample.exclusion == QuoteExclusionReason::Stale) has_stale = true;
+        }
+        if (!has_stale) return result;
 
         const auto normal_age = *aggregation.max_age_ms;
         aggregation.max_age_ms = policy.max_last_known_age_ms;

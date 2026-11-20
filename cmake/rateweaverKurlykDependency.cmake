@@ -1,0 +1,45 @@
+# Pinned kurlyk has no install/export package. Prefer the host's target; a
+# standalone HTTP-only consumer can instead supply external headers and CURL.
+# No dependency path is baked into RateWeaver's installed exports.
+function(rateweaver_resolve_kurlyk required)
+    if(TARGET rateweaver_deps::kurlyk)
+        return()
+    endif()
+    if(NOT TARGET kurlyk::kurlyk AND NOT TARGET kurlyk AND NOT RATEWEAVER_KURLYK_INCLUDE_DIR)
+        find_package(kurlyk QUIET CONFIG)
+    endif()
+    if(TARGET kurlyk::kurlyk)
+        set(kurlyk_target kurlyk::kurlyk)
+    elseif(TARGET kurlyk)
+        set(kurlyk_target kurlyk)
+    else()
+        find_path(RATEWEAVER_KURLYK_INCLUDE_DIR NAMES kurlyk.hpp
+            DOC "External kurlyk include directory (the embedding host owns its configuration)")
+        if(RATEWEAVER_KURLYK_INCLUDE_DIR)
+            if(required)
+                find_package(CURL REQUIRED)
+            else()
+                find_package(CURL QUIET)
+            endif()
+        endif()
+        if(NOT RATEWEAVER_KURLYK_INCLUDE_DIR OR NOT TARGET CURL::libcurl)
+            if(required)
+                message(FATAL_ERROR "Provide a kurlyk target, or RATEWEAVER_KURLYK_INCLUDE_DIR and CURL::libcurl")
+            endif()
+            return()
+        endif()
+    endif()
+    add_library(rateweaver_deps::kurlyk INTERFACE IMPORTED GLOBAL)
+    if(kurlyk_target)
+        set_target_properties(rateweaver_deps::kurlyk PROPERTIES
+            INTERFACE_LINK_LIBRARIES "${kurlyk_target}")
+    else()
+        set_target_properties(rateweaver_deps::kurlyk PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${RATEWEAVER_KURLYK_INCLUDE_DIR}"
+            INTERFACE_LINK_LIBRARIES "CURL::libcurl")
+        if(WIN32)
+            set_property(TARGET rateweaver_deps::kurlyk APPEND PROPERTY
+                INTERFACE_LINK_LIBRARIES ws2_32 crypt32)
+        endif()
+    endif()
+endfunction()

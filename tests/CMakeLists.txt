@@ -13,7 +13,6 @@ endfunction()
 
 rateweaver_test(rateweaver_core_tests core_tests.cpp)
 rateweaver_test(rateweaver_odr_test "odr_main.cpp;odr_peer.cpp")
-rateweaver_test(rateweaver_runtime_edge_tests runtime_edge_tests.cpp)
 
 add_test(NAME rateweaver_superproject
     COMMAND ${CMAKE_COMMAND}
@@ -35,6 +34,28 @@ if(RATEWEAVER_ENABLE_ECB)
     target_compile_definitions(rateweaver_provider_tests PRIVATE RATEWEAVER_TEST_ECB=1)
 endif()
 
+if(RATEWEAVER_ENABLE_KURLYK AND RATEWEAVER_BUILD_PROVIDERS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_executable(rateweaver_kurlyk_http_tests kurlyk_http_tests.cpp)
+    target_link_libraries(rateweaver_kurlyk_http_tests PRIVATE rateweaver::kurlyk rateweaver::providers)
+    target_compile_definitions(rateweaver_kurlyk_http_tests PRIVATE
+        KURLYK_AUTO_INIT=0 KURLYK_WEBSOCKET_SUPPORT=0 KURLYK_AUTH_SUPPORT=0 KURLYK_OAUTH_SUPPORT=0)
+    if(RATEWEAVER_ENABLE_ECB)
+        target_link_libraries(rateweaver_kurlyk_http_tests PRIVATE rateweaver::ecb)
+        target_compile_definitions(rateweaver_kurlyk_http_tests PRIVATE RATEWEAVER_TEST_ECB=1)
+    endif()
+    set_target_properties(rateweaver_kurlyk_http_tests PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    add_test(NAME rateweaver_kurlyk_http_tests COMMAND Python3::Interpreter
+        "${CMAKE_CURRENT_SOURCE_DIR}/http_server.py"
+        --exe $<TARGET_FILE:rateweaver_kurlyk_http_tests> --timeout 90)
+    set_tests_properties(rateweaver_kurlyk_http_tests PROPERTIES TIMEOUT 100)
+    add_test(NAME rateweaver_native_http_manual COMMAND Python3::Interpreter
+        "${CMAKE_CURRENT_SOURCE_DIR}/http_server.py"
+        --exe $<TARGET_FILE:rateweaver_kurlyk_http_tests> --timeout 90 --manual)
+    set_tests_properties(rateweaver_native_http_manual PROPERTIES TIMEOUT 100)
+endif()
+
 # Every public header is the first and only include in its own translation
 # unit. This also catches stale domain umbrellas and accidental include order.
 file(GLOB_RECURSE public_headers CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/include/*.hpp")
@@ -47,6 +68,10 @@ foreach(header IN LISTS public_headers)
         endif()
     endif()
     if(relative MATCHES "providers/ecb" AND NOT RATEWEAVER_ENABLE_ECB)
+        continue()
+    endif()
+    if((relative STREQUAL "rateweaver/runtime.hpp" OR relative MATCHES "runtime/kurlyk")
+       AND NOT RATEWEAVER_ENABLE_KURLYK)
         continue()
     endif()
     string(MAKE_C_IDENTIFIER "${relative}" identifier)
@@ -63,6 +88,11 @@ endif()
 if(RATEWEAVER_ENABLE_ECB)
     target_link_libraries(rateweaver_public_headers PRIVATE rateweaver::ecb)
 endif()
+if(RATEWEAVER_ENABLE_KURLYK)
+    target_link_libraries(rateweaver_public_headers PRIVATE rateweaver::kurlyk)
+    target_compile_definitions(rateweaver_public_headers PRIVATE
+        KURLYK_AUTO_INIT=0 KURLYK_WEBSOCKET_SUPPORT=0 KURLYK_AUTH_SUPPORT=0 KURLYK_OAUTH_SUPPORT=0)
+endif()
 
 if(RATEWEAVER_INSTALL)
     add_test(NAME rateweaver_installed_consumer
@@ -76,7 +106,7 @@ if(RATEWEAVER_INSTALL)
             "-DCONFIG=$<CONFIG>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/installed_consumer.cmake")
     set_tests_properties(rateweaver_installed_consumer PROPERTIES TIMEOUT 120)
-    if(RATEWEAVER_BUILD_PROVIDERS OR RATEWEAVER_ENABLE_ECB)
+    if(RATEWEAVER_BUILD_PROVIDERS OR RATEWEAVER_ENABLE_ECB OR RATEWEAVER_ENABLE_KURLYK)
         add_test(NAME rateweaver_installed_components
             COMMAND ${CMAKE_COMMAND}
                 "-DBUILD_DIR=${PROJECT_BINARY_DIR}"
@@ -84,6 +114,10 @@ if(RATEWEAVER_INSTALL)
                 "-DWORK_DIR=${PROJECT_BINARY_DIR}/install-components"
                 "-DCONSUMER_TYPE=components"
                 "-DCONSUME_JSON=${RATEWEAVER_BUILD_PROVIDERS}" "-DCONSUME_ECB=${RATEWEAVER_ENABLE_ECB}"
+                "-DCONSUME_KURLYK=${RATEWEAVER_ENABLE_KURLYK}"
+                "-DKURLYK_INCLUDE_DIR=${RATEWEAVER_KURLYK_INCLUDE_DIR}"
+                "-DCURL_INCLUDE_DIR=${CURL_INCLUDE_DIR}" "-DCURL_LIBRARY=${CURL_LIBRARY_RELEASE}"
+                "-DCURL_DIR=${CURL_DIR}"
                 "-DJSON_DIR=${nlohmann_json_DIR}" "-DXML_DIR=${pugixml_DIR}"
                 "-DGENERATOR=${CMAKE_GENERATOR}" "-DGENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
                 "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}" "-DCONFIG=$<CONFIG>"

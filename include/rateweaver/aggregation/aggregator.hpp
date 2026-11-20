@@ -1,6 +1,6 @@
 #pragma once
 
-#include <rateweaver/routing/graph.hpp>
+#include <rateweaver/core/graph.hpp>
 
 #include <algorithm>
 #include <cstdint>

@@ -1,71 +1,134 @@
-# Foundation validation
+# Native asynchronous foundation validation
 
-Validation date: 2026-11-20. Baseline:
-`848bad90818a1d0f8625ab76d1db1feb08876b9c`. The exact resulting revision and
-review link are recorded in the Draft PR; no release tag is created.
+Validation date: 2026-11-20. This corrective pass starts at
+`282a6b3b3d580e3e05de4318aafe043cb3c5df4b` in Draft PR #1. The resulting exact
+revision and its CI run are recorded in that PR. No release tag or MGC change
+is included. Results below are from the corrected source, not the starting HEAD.
 
-## Core and packaging
+## Release matrix and package checks
 
-Release builds passed with MinGW GCC 15.2.0, MSVC 19.44.35228 and Linux GCC
-15.2.0 in Ubuntu/WSL. The complete JSON/ECB configuration passes seven CTest
-entries: core regressions, multiple-translation-unit linkage, runtime edges,
-embedded superproject, provider/runtime regressions, relocated installed core
-consumer and relocated installed component consumer. All 23 public headers
-compile as the only include in their own C++17 translation units.
+| Toolchain | Full CTest (including opt-in live) | Native owned limiter, 3 refreshes / 500 ms period |
+| --- | --- | --- |
+| MinGW GCC 15.2.0 | 9/9 passed, 49.99 s | 1058 ms |
+| MSVC 19.44.35228 | 9/9 passed, 42.19 s | 1050 ms |
+| Linux GCC 15.2.0 (Ubuntu/WSL) | 9/9 passed, 77.91 s | 1003 ms |
 
-Core-only validation also passed without enabling parser dependencies. A
-separate MinGW configuration enabled ECB while disabling JSON package discovery,
-including an installed ECB component consumer, to check optional isolation.
+The full configuration builds JSON, ECB, native kurlyk and live examples in
+Release. All 19 public headers compile individually as the first/only include
+of their translation units. Multi-TU linkage, standalone and embedded builds,
+relocated installed core and optional JSON/XML/kurlyk consumers pass. The core
+consumer disables JSON, XML, kurlyk and CURL discovery and remains usable.
+An additional MinGW ECB-only profile passes 6/6 with JSON/HTTP discovery disabled.
 
-`rateweaver_core_tests` contains 146 Release-active checks across currency,
-publication, graphs, aggregation, timestamp eligibility, LastKnown, routing and
-concurrent access. The concurrency case uses two writers and three readers,
-checks complete two-quote source batches, reader revision monotonicity, exactly
-400 successful writer revisions and snapshot ownership. It is correctness
-evidence for those exercised paths, not a throughput or lock-free claim.
+Core has 168 Release-active checks; parser fixtures have 66. The native loopback
+suite's check count varies with its control-poll scheduling; manual kurlyk
+processing has 7. No test relies on NDEBUG-disabled
+assertions. The core reader/writer regression checks atomic two-quote batches,
+revision monotonicity, 400 successful publications and snapshot ownership.
 
-The installed consumer is copied to a separate scratch source directory. The
-install prefix is relocated before configure; package registries and optional
-dependency discovery are disabled. It checks conversion/provenance and
-unavailable-versus-zero semantics through `find_package`. The additional
-OPTIONAL_COMPONENTS regression is enabled only by the test runner, keeping the
-same example usable as a normal independent consumer.
+The NoConsensus regression uses conflicting fresh quotes plus an additional
+stale vote. It fails against the previous policy and passes with the correction.
+LastKnown also retains disabled-source, quorum, outlier, future-time and maximum
+age rejection, and contributor origin/usage. QuoteGraph has one canonical Core
+implementation, unconditional reciprocals and explicit reverse preference;
+the old routing graph, GraphBuildOptions and forwarding policy/graph headers
+have been removed.
 
-Representative commands (use a task-specific build directory):
+## Actual HTTP, cancellation and limiter checks
+
+Tests use the exact MGC kurlyk pin
+`fe2698dec259a7e417883e1f41985ed21ec28b55`, real libcurl and a Python standard
+library HTTP server on an ephemeral loopback port. No fake transport or public
+network is needed. Covered behavior:
+
+- CDN/CBR JSON and ECB XML; successful chunked transfer parsed once;
+- ETag/304 retention, unsolicited 304, final 404/500/503, malformed JSON/XML,
+  empty body, empty feed, rejected partial feed and explicit partial acceptance;
+- native retry with intermediate non-final responses, timeout and streamed
+  overflow; old quotes/revision remain intact on failure;
+- same-source Busy, multiple providers publishing into one book, cancellation
+  followed by late successful response, terminal stop and reentrant parsing;
+- parser/controller/book destruction, native client destruction with pending
+  work, completion-clock failure, and host deinit with an active request;
+- actual TCP peer EOF after native cancellation/timeout/client destruction;
+- a single owned client limiter persists across three refreshes; a shared
+  sequential handle prevents the second client's arrival until the first gate
+  is released (the server rejects incorrect ordering);
+- init(false), manual process/poll and callback drain before client destruction,
+  with no background worker required by RateWeaver.
+
+The completion timestamp test signals from the actual final callback's clock
+sample, advances the injected clock, then polls: retrieval time stays at HTTP
+completion. It deliberately does not treat the pinned native group wait as a
+reliable drain assertion.
+
+These results do not establish a hard receive-memory ceiling or upstream race
+freedom. The pinned client's body buffering and group accounting defects are
+recorded with a separate change proposal in [the kurlyk audit](kurlyk-limitations.md).
+Cancel/stop fence publication; actual native I/O cancellation still belongs to
+the host client and can wait for callbacks. No blocking HTTP adapter was added.
+
+## Live HTTPS
+
+With an explicit trusted CA bundle, all three endpoints returned HTTP 200 and
+Updated on Windows and Linux. Each independent book reached revision 1:
+
+| Source | Quotes | Source timestamp (Unix ms) | Direct/reciprocal check |
+| --- | --- | --- | --- |
+| CDN | 339 | 1795046400000 | USD/EUR, observed contributors, Normal usage |
+| CBR redistribution | 54 | 1795163400000 | USD/RUB at the explicitly labelled feed timestamp |
+| ECB | 29 | 1795046400000 | EUR/USD, observed contributors, Normal usage |
+
+The executable prints HTTP/refresh status, attempts, source/retrieval timestamps,
+revision, converted amount and each contributor's origin/usage/reversal. Numeric
+rates are not asserted. CBR announced a future effective timestamp during this
+run: current valuation was correctly unavailable, then routing arithmetic was
+checked separately at the feed timestamp. That is not authorization to value
+current amounts with future observations.
+
+Live CTest is opt-in and excluded from mandatory CI. Exit 77 means endpoint or
+network unavailability and is displayed as SKIP. TLS trust-file/verification
+errors fail explicitly; a missing CA bundle is not reported as a successful
+network check. Configure RATEWEAVER_LIVE_CA_FILE or pass a bundle path directly
+to rateweaver_live_providers (Linux system bundle: /etc/ssl/certs/ca-certificates.crt).
+
+## Reproduction and dependencies
+
+Core: CMake 3.20+, C++17, platform Threads. Parser dependencies used here are
+MGC's nlohmann/json `55f93686c01528224f448c19128836e7df245f72` (3.12.0) and
+pugixml 1.15 `ee86beb30e4973f5feffe3ce63bfa4fbadf72f38`. Windows native HTTP
+uses MGC's existing shared curl 8.11.0; Linux uses its system libcurl 8.18.
+No dependency is copied into RateWeaver or required by core-only consumers.
 
 ```sh
 cmake -S . -B tmp/agent-work/release -DCMAKE_BUILD_TYPE=Release \
-  -DRATEWEAVER_BUILD_TESTS=ON -DRATEWEAVER_BUILD_EXAMPLES=ON
+  -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON \
+  -DRATEWEAVER_ENABLE_KURLYK=ON \
+  -DRATEWEAVER_KURLYK_INCLUDE_DIR=/path/to/pinned/kurlyk/include
 cmake --build tmp/agent-work/release
 ctest --test-dir tmp/agent-work/release -C Release --output-on-failure
 ```
 
-Windows routine validation selects `MinGW Makefiles`; the additional MSVC
-configuration selects `Visual Studio 17 2022` with `-A x64` and builds with
-`--config Release`. Linux selects `Unix Makefiles`. Separate trees are used for
-each compiler and optional dependency binaries.
+Supply parser packages and CURL::libcurl (or the host's existing kurlyk target).
+Windows routine builds use MinGW Makefiles; additional MSVC uses Visual Studio
+17 2022. Linux uses Unix Makefiles. Builds use separate ignored task trees.
 
-## Providers and integration
+## Sanitizers and consumer readiness
 
-The full provider/runtime executable has 132 Release-active checks and the
-runtime edge executable has 23. They exercise all three feed fixtures,
-malformed/empty/partial responses, duplicate JSON members and normalized pairs,
-CBR nominal scaling/UTC offset, calendar validation, source/retrieval times,
-transport errors/timeouts, response caps, ETag, cancellation, concurrent overlap,
-reentrant stop, rejected publication and completion-clock exceptions. Quotes
-and revisions are retained on failure. Retrieval time is measured after the
-transport returns, while `304` changes neither timestamps nor revision.
+Current native/manual tests pass under ASan+UBSan (2/2, 4.31 s) and TSan
+(2/2, 4.11 s), with leak detection and halt-on-error enabled. The final empty
+clock-exception regression is included. No sanitizer findings were reported.
+The broader ASan+UBSan suite passed 8/8 and TSan core/native/manual passed 3/3;
+the affected native cases were rebuilt and rerun after the final correction.
+Compilation used -O1 -g -DNDEBUG, the corresponding -fsanitize flags and frame
+pointers. Instrumentation covers test executables and the library/dependency
+headers compiled into them; system libcurl and installed-consumer sub-builds
+were not instrumented. These executed paths do not prove upstream race freedom
+or repair the pinned dependency's documented synchronization defect.
 
-Parser dependencies used for validation were MGC's existing nlohmann/json
-`55f93686c01528224f448c19128836e7df245f72` (3.12.0) and optional pugixml 1.15
-`ee86beb30e4973f5feffe3ce63bfa4fbadf72f38`. Dependency binaries were built
-separately for MinGW, MSVC and Linux under ignored task scratch directories.
-
-Live network interoperability and a concrete host `kurlyk` transport bridge are
-not established by fixture tests. There is no historical quote store,
-accounting rounding policy or MGC integration in this change.
-
-The [MGC audit](mgc-integration.md) identifies the exact consumer revision and
-two current acceptance blockers: unknown currency is classified as Native, and
-the consumer smoke test uses Release-disabled `assert`. MGC source and
-submodule pins remain unchanged by the RateWeaver work.
+Core and parsing are independently consumable. Native HTTP is suitable for
+integration evaluation; production MGC acceptance remains gated on the kurlyk
+fix/review and the [MGC consumer findings](mgc-integration.md). MGC PR #63 remains
+unchanged: unknown aggregate currency must not become Native, and its smoke
+checks must be active in Release. No historical quote store or accounting
+rounding policy is implemented by this library.

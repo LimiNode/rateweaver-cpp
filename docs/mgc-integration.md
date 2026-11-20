@@ -1,7 +1,7 @@
 # MGC consumer integration proposal
 
 Status: draft; no MGC integration is implemented by this change. Audit date:
-2026-11-19. Consumer revision: `LimiNode/mgc-platform`
+2026-11-20 (PR head and gitlinks rechecked). Consumer revision: `LimiNode/mgc-platform`
 `48f69293603032e33be88a783cfd5b078eaf6c5a`, the open Draft
 [PR #63](https://github.com/LimiNode/mgc-platform/pull/63), based on
 `feat/versioned-demo-profile`.
@@ -17,7 +17,7 @@ The gitlinks at the audited MGC revision are the pin authority. Its
 | Dependency | Actual gitlink | Consumer compatibility |
 | --- | --- | --- |
 | nlohmann/json | `55f93686c01528224f448c19128836e7df245f72` (`v3.12.0`) | Reuse MGC's existing `nlohmann_json::nlohmann_json` target for JSON providers. |
-| kurlyk | `fe2698dec259a7e417883e1f41985ed21ec28b55` | MGC propagates its headers through `mgc_optionx_headers`; its pinned CMake project declares version 1.0.2. A transport adapter must use this host-owned runtime rather than initialize a second global runtime. |
+| kurlyk | `fe2698dec259a7e417883e1f41985ed21ec28b55` | MGC propagates its headers through `mgc_optionx_headers`; its pinned CMake project declares version 1.0.2. Use the native `KurlykRefresh` integration with the host-owned runtime and long-lived source client. |
 | time-shield-cpp | `d3c251bf173ee6222f6e79186a34c4a0592d5767` | The pin lacks `time_shield/core/types.hpp`, which baseline RateWeaver included. Using RateWeaver's signed millisecond timestamps and standard C++17 clock removes this incompatible include dependency. |
 | pugixml | No direct submodule | Only needed when the optional ECB adapter is enabled; review one explicit shared dependency pin in a later integration change. |
 
@@ -33,6 +33,56 @@ engine implementation sources; a capability detail adapter can link
 composition root owns its lifecycle. GUI controllers receive immutable
 versioned DTOs/events and only render status and amounts. Introduce shared
 contracts only for fields that actually cross engine/GUI boundaries.
+
+## Native asynchronous refresh ownership
+
+The optional `rateweaver::kurlyk` component links the host's `kurlyk` target
+when available. The pinned upstream has no installed CMake package; independent
+consumers may supply external headers through `RATEWEAVER_KURLYK_INCLUDE_DIR`
+and `CURL::libcurl`. These are consumer-provided dependencies, never vendored
+or stored as absolute paths in RateWeaver's install exports. JSON and XML
+remain independently optional parser components.
+
+Use one long-lived, dedicated `kurlyk::HttpClient` per provider configuration.
+Configure its headers, timeout/retry policy and owned/shared rate-limit handles
+once. Construct `KurlykRefresh` with that client and a QuoteBook, call `start()`
+without waiting for HTTP completion, and call `poll()` from the host execution
+context to parse and publish a completed response. The object adds no worker,
+network queue, retry engine or HTTP limiter. Its refresh interval is data-age
+policy, separate from the client's HTTP admission limits.
+
+MGC owns `kurlyk::init`/processing/teardown; RateWeaver must not create a second
+process-global runtime. Keep the book and client alive through all host calls.
+Stop refresh publication before tearing down the client/runtime, and never
+destroy the client from its own network callback. A refresh generation fence
+rejects late results, while real network cancellation remains owned by the
+native client.
+
+The pinned manager also temporarily omits requests from group accounting during
+pending-to-active transfer and does not consistently synchronize every container
+read used by group wait/cancel/admission. Do not treat a returned native wait
+or cancel call as proof that callbacks have drained. Keep callback state alive
+and coordinate final worker stop/join before reclaiming host objects. Current
+loopback checks exercise the observed paths; they do not establish general
+upstream race freedom or production-safe concurrent teardown.
+
+The pinned client's cancellation method waits for its request-group barrier,
+and its streaming callback runs after internal body accumulation. Consequently
+RateWeaver's `cancel()` immediately fences publication but does not promise
+nonblocking socket cancellation; `max_body_bytes` rejects oversized data but
+is not a hard receive-memory ceiling. See the
+[pinned API limitations](kurlyk-limitations.md). An integration review must
+accept these boundaries or review a separate kurlyk change before claiming
+stronger cancellation/resource guarantees.
+
+The pin also has a pending-to-active accounting gap and unsynchronized public
+group queries. A native group wait/cancel return is not a sufficient lifetime
+proof; keep callback captures alive and coordinate the host's worker stop/join.
+These dependency defects require a separate kurlyk review before production
+MGC acceptance. RateWeaver's own final-callback fence does not depend on native
+group counts.
+The group-accounting/synchronization finding is an additional upstream review
+gate before MGC production integration.
 
 ## Conversion projection contract
 
@@ -101,7 +151,8 @@ its source-currency label.
 
 A separate MGC Draft PR should be prepared only after a reviewed exact
 RateWeaver commit passes standalone Release tests, public-header compilation,
-relocated install-consumer verification and provider fixture tests. Review is
+relocated core/parser/native-component consumers, provider fixture tests and
+real kurlyk loopback HTTP/lifecycle tests. Review is
 still required; passing tests does not make the current working revision a
 reviewed pin. MGC remains unchanged by this proposal.
 

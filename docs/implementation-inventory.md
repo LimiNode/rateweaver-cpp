@@ -48,10 +48,13 @@ provider dependencies.
 | --- | --- |
 | Core, graph and router | Implemented; core regressions exercise publication, revisions, numeric limits, deterministic routes and concurrent snapshots. |
 | Quote policy | Missing baseline implementation reconstructed; bounded LastKnown, per-input usage and preserved filtering are exercised by core tests. |
-| Package and umbrellas | Implemented; 23 public headers, standalone/superproject builds and relocated core/component consumers are checked in Release. |
-| CDN/CBR/ECB | Implemented with offline fixtures; malformed/empty/partial data, timestamps, normalization and publication retention are exercised. Live network behavior is unverified. |
-| Refresh | Implemented as host-driven synchronous calls with injected clock, per-controller overlap gate, cooperative cancellation and conditional ETag; runtime edge tests cover reentrancy and shutdown publication suppression. |
-| Host HTTP bridge | Interface supplied; a concrete host `kurlyk` bridge remains an integration responsibility. No global HTTP runtime is created. |
+| Package and umbrellas | Install/export, standalone/superproject builds and relocated core/component consumers; optional dependencies are isolated. |
+| Graph ownership | Canonical implementation in Core; Routing depends on Core. No old routing graph, forwarding graph header or GraphBuildOptions remains. Reciprocals are automatic. |
+| Quote policy correction | Implementation belongs to Aggregation. LastKnown cannot retry NoConsensus or rehabilitate already rejected outliers by adding stale votes. |
+| CDN/CBR/ECB | Separate JSON/XML parsers, offline fixtures, real loopback HTTP tests and an opt-in live example. See validation for observed results. |
+| Refresh | Native KurlykRefresh start/poll API; persistent host-owned HttpClient, source ETag, overlap gate and publication fence. No RateWeaver background thread or HTTP retry/limiter. |
+| Removed transport layer | HttpTransport, RateWeaver HttpRequest/HttpResponse, CancellationToken and the synchronous RefreshController have been removed. |
+| Pinned HTTP constraints | The exact MGC pin cannot enforce a pre-append receive memory cap or expose nonwaiting client cancellation. See the separate kurlyk proposal; these requirements remain gated. |
 | Historical valuation/MGC | No historical store or MGC adapter is implemented; the separate integration gate is blocked by the audited consumer defects. |
 
 Source inventory is verified by reading the baseline commit. Packaging and
