@@ -1,7 +1,6 @@
 #pragma once
 
-#include <rateweaver/routing/graph.hpp>
-#include <time_shield/core/time_utils.hpp>
+#include <rateweaver/core/graph.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -49,7 +48,8 @@ enum class QuoteExclusionReason {
     SyntheticDisabled, ///< Synthetic quotes are not enabled by the caller.
     ObservedPreferred, ///< Eligible observed quotes take precedence over synthetic ones.
     DuplicateSource,   ///< Another candidate from the same source was already accepted.
-    Outlier            ///< Rate differs too much from the pre-filter median.
+    Outlier,           ///< Rate differs too much from the pre-filter median.
+    FutureEffectiveDate ///< Source rate is not yet applicable at valuation time.
 };
 
 /// \brief Configures rate aggregation for a single directed currency pair.
@@ -79,13 +79,14 @@ struct AggregationOptions {
 
     /// \brief Optional maximum quote age in milliseconds.
     ///
-    /// Uses `published_at` if present, otherwise `retrieved_at`. A missing
+    /// Uses `published_at`, otherwise `effective_at`, otherwise `retrieved_at`. A missing
     /// timestamp excludes an observed quote when this limit is set.
-    /// \note std::nullopt disables freshness filtering, not fallback policy.
+    /// \note std::nullopt disables age filtering. Future source applicability
+    ///       is always rejected; clock skew cannot enable a future rate period.
     std::optional<ts_ms_t> max_age_ms;
 
     /// \brief Reference Unix timestamp in milliseconds for freshness checks.
-    /// \note If absent, the aggregator samples time_shield::ts_ms() once.
+    /// \note If absent, the aggregator samples current_time_ms() once.
     std::optional<ts_ms_t> reference_time;
 
     /// \brief Allowed future clock skew in milliseconds for quote timestamps.
@@ -134,6 +135,15 @@ struct AggregationResult {
     }
 };
 
+namespace aggregation_detail {
+
+inline std::optional<ts_ms_t> age_timestamp(const Quote& quote) noexcept {
+    return quote.published_at ? quote.published_at
+        : quote.effective_at ? quote.effective_at : quote.retrieved_at;
+}
+
+} // namespace aggregation_detail
+
 /// \brief Performs deterministic, provenance-preserving quote aggregation.
 ///
 /// Input quotes are taken from an immutable QuoteGraph. Explicit and derived
@@ -180,7 +190,7 @@ public:
         if (edges.empty()) return result;
 
         const ts_ms_t now = options.reference_time
-            ? *options.reference_time : time_shield::ts_ms();
+            ? *options.reference_time : current_time_ms();
         std::vector<std::size_t> observed;
         std::vector<std::size_t> synthetic;
         std::set<std::string> observed_sources;
@@ -204,7 +214,9 @@ public:
                 sample.exclusion = QuoteExclusionReason::InvalidRate;
             } else {
                 sample.rate = effective;
-                if (edge.quote.origin == QuoteOrigin::Synthetic) {
+                if (edge.quote.effective_at && *edge.quote.effective_at > now) {
+                    sample.exclusion = QuoteExclusionReason::FutureEffectiveDate;
+                } else if (edge.quote.origin == QuoteOrigin::Synthetic) {
                     if (!options.allow_synthetic_fallback) {
                         sample.exclusion = QuoteExclusionReason::SyntheticDisabled;
                     } else if (!synthetic_sources.insert(edge.quote.source_id).second) {
@@ -338,10 +350,11 @@ private:
     static QuoteExclusionReason freshness_status(const Quote& quote,
                                                  const AggregationOptions& options,
                                                  ts_ms_t now) noexcept {
-        if (!options.max_age_ms) return QuoteExclusionReason::None;
-        const auto timestamp = quote.published_at ? quote.published_at
-                                                  : quote.retrieved_at;
-        if (!timestamp) return QuoteExclusionReason::MissingTimestamp;
+        const auto timestamp = aggregation_detail::age_timestamp(quote);
+        if (!timestamp) {
+            return options.max_age_ms ? QuoteExclusionReason::MissingTimestamp
+                                      : QuoteExclusionReason::None;
+        }
 
         // Unsigned differences avoid signed overflow at timestamp extremes.
         if (*timestamp > now) {
@@ -351,6 +364,7 @@ private:
                        ? QuoteExclusionReason::FutureTimestamp
                        : QuoteExclusionReason::None;
         }
+        if (!options.max_age_ms) return QuoteExclusionReason::None;
         const auto age_ms = static_cast<std::uint64_t>(now) -
                             static_cast<std::uint64_t>(*timestamp);
         return age_ms > static_cast<std::uint64_t>(*options.max_age_ms)

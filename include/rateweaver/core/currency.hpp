@@ -13,9 +13,9 @@ namespace rateweaver {
 
 namespace detail {
 
-/// \brief Checks whether a byte is ASCII whitespace or a control character.
-inline constexpr bool is_ascii_space_or_control(unsigned char ch) noexcept {
-    return ch <= 0x20 || ch == 0x7F;
+/// \brief Checks ASCII whitespace without discarding other control bytes.
+inline constexpr bool is_ascii_whitespace(unsigned char ch) noexcept {
+    return ch == ' ' || (ch >= '\t' && ch <= '\r');
 }
 
 } // namespace detail
@@ -27,11 +27,11 @@ inline constexpr bool is_ascii_space_or_control(unsigned char ch) noexcept {
 /// \note Non-ASCII bytes and internal characters are preserved. This function
 ///       does not validate identifiers or resolve aliases (e.g. USD and USDT).
 inline std::string normalize_currency_code(std::string_view code) {
-    while (!code.empty() && detail::is_ascii_space_or_control(
+    while (!code.empty() && detail::is_ascii_whitespace(
                                 static_cast<unsigned char>(code.front()))) {
         code.remove_prefix(1);
     }
-    while (!code.empty() && detail::is_ascii_space_or_control(
+    while (!code.empty() && detail::is_ascii_whitespace(
                                 static_cast<unsigned char>(code.back()))) {
         code.remove_suffix(1);
     }
@@ -49,18 +49,18 @@ inline std::string normalize_currency_code(std::string_view code) {
 
 /// \brief Checks whether a currency identifier is in canonical form.
 /// \param code Currency identifier to validate.
-/// \return True if the identifier is non-empty, contains no ASCII whitespace
-///         or control characters, and contains no lowercase ASCII letters.
-/// \note This is not a currency whitelist or a UTF-8 validator. Arbitrary
-///       non-ASCII bytes and punctuation are permitted by this core policy.
+/// \return True for 1..32 ASCII characters, starting with an uppercase letter
+///         or digit and continuing with uppercase letters, digits, `_`, `.`,
+///         `:`, or `-`.
+/// \note This bounded identifier grammar supports fiat, crypto, metals and
+///       custom namespaces without an ISO whitelist or implicit alias mapping.
 inline bool is_valid_currency_code(std::string_view code) noexcept {
-    if (code.empty()) return false;
+    if (code.empty() || code.size() > 32) return false;
+    bool first = true;
     for (char ch : code) {
-        const auto byte = static_cast<unsigned char>(ch);
-        if (detail::is_ascii_space_or_control(byte) ||
-            (ch >= 'a' && ch <= 'z')) {
-            return false;
-        }
+        const bool alphanumeric = (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+        if (!alphanumeric && (first || (ch != '_' && ch != '.' && ch != ':' && ch != '-'))) return false;
+        first = false;
     }
     return true;
 }

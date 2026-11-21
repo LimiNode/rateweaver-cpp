@@ -1,0 +1,6 @@
+function(run_checked)
+    execute_process(COMMAND ${ARGV} RESULT_VARIABLE result)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "Consumer command failed (${result}): ${ARGV}")
+    endif()
+endfunction()

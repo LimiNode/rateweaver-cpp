@@ -1,13 +1,13 @@
 #pragma once
 
-#include <chrono>
+#include <time_shield/core/types.hpp>
+#include <time_shield/core/time_utils.hpp>
+
 #include <cmath>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <time_shield/core/types.hpp>
 
 /// \file types.hpp
 /// \brief Defines fundamental currency, quote, route and conversion types.
@@ -16,6 +16,17 @@ namespace rateweaver {
 
 /// \brief Unix timestamp in milliseconds since 1970-01-01T00:00:00Z.
 using ts_ms_t = time_shield::ts_ms_t;
+
+/// \brief Returns the system clock's Unix timestamp in milliseconds.
+/// \note Supply a reference timestamp explicitly for reproducible valuation.
+inline ts_ms_t current_time_ms() noexcept {
+    return time_shield::ts_ms();
+}
+
+/// \brief Returns opaque monotonic milliseconds for intervals, never valuation.
+inline ts_ms_t monotonic_time_ms() noexcept {
+    return time_shield::monotonic_ms();
+}
 
 /// \brief Describes the origin of an exchange rate.
 ///
@@ -41,8 +52,9 @@ enum class QuoteUsage {
 /// Currency identifiers must be normalized and distinct, and the rate must be
 /// finite and strictly positive.
 ///
-/// Publication and retrieval timestamps are optional and have different
-/// meanings: the former belongs to the source data, the latter to retrieval.
+/// Publication, applicability and retrieval are independent. A daily source
+/// date is represented by `effective_at` at UTC midnight; this normalization
+/// does not assert an exact publication time or provide historical lookup.
 struct Quote {
     std::string  from;                     ///< Base currency (one unit).
     std::string  to;                       ///< Quote currency (units per base unit).
@@ -51,6 +63,7 @@ struct Quote {
     QuoteOrigin  origin = QuoteOrigin::Observed; ///< Origin of the rate.
     std::optional<ts_ms_t> published_at;   ///< Publication time reported by the source.
     std::optional<ts_ms_t> retrieved_at;   ///< Time of successful retrieval.
+    std::optional<ts_ms_t> effective_at;   ///< Source applicability instant or normalized daily rate date.
 
     /// \brief Constructs an empty quote with default field values.
     Quote() = default;
@@ -63,19 +76,22 @@ struct Quote {
     /// \param origin_       Origin of the rate.
     /// \param published_at_ Optional source publication time.
     /// \param retrieved_at_ Optional retrieval time.
+    /// \param effective_at_ Optional applicability instant or daily rate date.
     /// \note The constructor does not validate or normalize its arguments.
     Quote(std::string from_, std::string to_, double rate_,
           std::string source_id_ = {},
           QuoteOrigin origin_ = QuoteOrigin::Observed,
           std::optional<ts_ms_t> published_at_ = std::nullopt,
-          std::optional<ts_ms_t> retrieved_at_ = std::nullopt)
+          std::optional<ts_ms_t> retrieved_at_ = std::nullopt,
+          std::optional<ts_ms_t> effective_at_ = std::nullopt)
         : from(std::move(from_)),
           to(std::move(to_)),
           rate(rate_),
           source_id(std::move(source_id_)),
           origin(origin_),
           published_at(published_at_),
-          retrieved_at(retrieved_at_) {}
+          retrieved_at(retrieved_at_),
+          effective_at(effective_at_) {}
 };
 
 /// \brief Records an original quote contributing to a conversion step.

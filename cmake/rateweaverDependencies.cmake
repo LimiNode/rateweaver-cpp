@@ -1,0 +1,121 @@
+function(rateweaver_require_submodule directory)
+    if(NOT EXISTS "${PROJECT_SOURCE_DIR}/${directory}/CMakeLists.txt")
+        message(FATAL_ERROR "Missing ${directory}. Run git submodule update --init --depth 1 (without --remote or --recursive).")
+    endif()
+endfunction()
+
+function(rateweaver_resolve_time_shield)
+    if(TARGET time_shield::time_shield)
+        return()
+    endif()
+    if(RATEWEAVER_DEPENDENCY_MODE STREQUAL "BUNDLED")
+        rateweaver_require_submodule(external/time-shield-cpp)
+        set(TIME_SHIELD_ENABLE_NTP_CLIENT OFF)
+        set(TIME_SHIELD_CPP_BUILD_TESTS OFF)
+        set(TIME_SHIELD_CPP_BUILD_EXAMPLES OFF)
+        add_subdirectory("${PROJECT_SOURCE_DIR}/external/time-shield-cpp" "${PROJECT_BINARY_DIR}/_deps/time-shield")
+    else()
+        find_package(TimeShield 2.0 CONFIG REQUIRED)
+    endif()
+endfunction()
+
+function(rateweaver_resolve_json)
+    if(TARGET nlohmann_json::nlohmann_json)
+        return()
+    endif()
+    if(RATEWEAVER_DEPENDENCY_MODE STREQUAL "BUNDLED")
+        rateweaver_require_submodule(external/json)
+        set(JSON_BuildTests OFF)
+        set(JSON_Install ON)
+        add_subdirectory("${PROJECT_SOURCE_DIR}/external/json" "${PROJECT_BINARY_DIR}/_deps/json")
+    else()
+        find_package(nlohmann_json 3.11 CONFIG REQUIRED)
+    endif()
+endfunction()
+
+function(rateweaver_resolve_pugixml)
+    if(TARGET pugixml::pugixml)
+        return()
+    endif()
+    if(RATEWEAVER_DEPENDENCY_MODE STREQUAL "BUNDLED")
+        rateweaver_require_submodule(external/pugixml)
+        set(PUGIXML_BUILD_TESTS OFF)
+        set(PUGIXML_BUILD_SHARED_AND_STATIC_LIBS OFF)
+        set(BUILD_SHARED_LIBS OFF)
+        add_subdirectory("${PROJECT_SOURCE_DIR}/external/pugixml" "${PROJECT_BINARY_DIR}/_deps/pugixml")
+    else()
+        find_package(pugixml 1.13 CONFIG REQUIRED)
+    endif()
+endfunction()
+
+include("${CMAKE_CURRENT_LIST_DIR}/rateweaverCurl.cmake")
+
+function(rateweaver_add_source_curl)
+    rateweaver_require_submodule(external/curl)
+    # Windows uses OS TLS; Linux uses system OpenSSL. No Asio or SWS is needed.
+    set(BUILD_SHARED_LIBS OFF)
+    set(BUILD_STATIC_LIBS ON)
+    set(BUILD_CURL_EXE OFF)
+    set(BUILD_TESTING OFF)
+    set(BUILD_LIBCURL_DOCS OFF)
+    set(BUILD_MISC_DOCS OFF)
+    set(ENABLE_CURL_MANUAL OFF)
+    # curl's dependency options use set(CACHE); preserve these function-local
+    # choices without forcing cache settings in an embedding application.
+    set(CMAKE_POLICY_DEFAULT_CMP0126 NEW)
+    foreach(protocol DICT FILE FTP GOPHER IMAP IPFS LDAP LDAPS MQTT POP3 RTSP SMTP TELNET TFTP WEBSOCKETS)
+        set(CURL_DISABLE_${protocol} ON)
+    endforeach()
+    set(CURL_ZLIB OFF)
+    set(CURL_BROTLI OFF)
+    set(CURL_ZSTD OFF)
+    set(CURL_USE_LIBPSL OFF)
+    set(CURL_USE_LIBSSH2 OFF)
+    set(USE_LIBIDN2 OFF)
+    set(USE_NGHTTP2 OFF)
+    set(USE_NGTCP2 OFF)
+    if(WIN32)
+        set(CURL_USE_SCHANNEL ON)
+        set(CURL_USE_OPENSSL OFF)
+    else()
+        set(CURL_USE_OPENSSL ON)
+    endif()
+    add_subdirectory("${PROJECT_SOURCE_DIR}/external/curl" "${PROJECT_BINARY_DIR}/_deps/curl")
+endfunction()
+
+function(rateweaver_add_bundled_http)
+    rateweaver_require_submodule(external/kurlyk)
+    rateweaver_resolve_curl()
+    # Upstream's full CMake target unconditionally configures WebSocket deps.
+    # This separately named package owns only its HTTP feature configuration.
+    add_library(rateweaver_kurlyk_http_dependency INTERFACE)
+    add_library(RateWeaverKurlykHttp::client ALIAS rateweaver_kurlyk_http_dependency)
+    set_target_properties(rateweaver_kurlyk_http_dependency PROPERTIES EXPORT_NAME client)
+    target_include_directories(rateweaver_kurlyk_http_dependency INTERFACE
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/external/kurlyk/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(rateweaver_kurlyk_http_dependency INTERFACE CURL::libcurl Threads::Threads)
+    target_compile_definitions(rateweaver_kurlyk_http_dependency INTERFACE
+        KURLYK_HTTP_SUPPORT=1 KURLYK_WEBSOCKET_SUPPORT=0 KURLYK_AUTH_SUPPORT=0
+        KURLYK_OAUTH_SUPPORT=0 KURLYK_AUTO_INIT=0)
+    if(WIN32)
+        target_link_libraries(rateweaver_kurlyk_http_dependency INTERFACE ws2_32 crypt32)
+    endif()
+    if(RATEWEAVER_INSTALL)
+        install(TARGETS rateweaver_kurlyk_http_dependency EXPORT RateWeaverKurlykHttpTargets COMPONENT RateWeaverDependencies)
+        install(EXPORT RateWeaverKurlykHttpTargets NAMESPACE RateWeaverKurlykHttp::
+            DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/RateWeaverKurlykHttp" COMPONENT RateWeaverDependencies)
+        install(DIRECTORY "${PROJECT_SOURCE_DIR}/external/kurlyk/include/"
+            DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" COMPONENT RateWeaverDependencies)
+        install(FILES "${PROJECT_SOURCE_DIR}/external/kurlyk/LICENSE"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/RateWeaverKurlykHttp" COMPONENT RateWeaverDependencies)
+        configure_package_config_file("${PROJECT_SOURCE_DIR}/cmake/RateWeaverKurlykHttpConfig.cmake.in"
+            "${PROJECT_BINARY_DIR}/RateWeaverKurlykHttpConfig.cmake"
+            INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/RateWeaverKurlykHttp")
+        write_basic_package_version_file("${PROJECT_BINARY_DIR}/RateWeaverKurlykHttpConfigVersion.cmake"
+            VERSION 1.1.1 COMPATIBILITY SameMajorVersion ARCH_INDEPENDENT)
+        install(FILES "${PROJECT_BINARY_DIR}/RateWeaverKurlykHttpConfig.cmake"
+            "${PROJECT_BINARY_DIR}/RateWeaverKurlykHttpConfigVersion.cmake"
+            DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/RateWeaverKurlykHttp" COMPONENT RateWeaverDependencies)
+    endif()
+endfunction()

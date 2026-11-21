@@ -1,0 +1,7 @@
+if(WIN32)
+    set(ENV{PATH} "$ENV{SystemRoot}/System32")
+endif()
+execute_process(COMMAND "${EXECUTABLE}" RESULT_VARIABLE result)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "Installed consumer failed with isolated runtime PATH: ${result}")
+endif()
