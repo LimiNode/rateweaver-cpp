@@ -3,16 +3,16 @@ set(platform_args)
 if(GENERATOR_PLATFORM)
     list(APPEND platform_args -A "${GENERATOR_PLATFORM}")
 endif()
-foreach(probe host system-missing unsupported-prebuilt)
+foreach(probe host legacy-normal system-missing unsupported-prebuilt)
     set(work_dir "${BUILD_DIR}/curl-resolution/${probe}")
     execute_process(COMMAND "${CMAKE_COMMAND}"
         -S "${CMAKE_CURRENT_LIST_DIR}/curl_resolution" -B "${work_dir}"
         -G "${GENERATOR}" ${platform_args} "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}"
         "-DRATEWEAVER_SOURCE_DIR=${SOURCE_DIR}" "-DPROBE=${probe}"
         RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
-    if(probe STREQUAL "host")
+    if(probe STREQUAL "host" OR probe STREQUAL "legacy-normal")
         if(NOT result EQUAL 0)
-            message(FATAL_ERROR "Host target reuse failed: ${output}\n${error}")
+            message(FATAL_ERROR "Resolver probe ${probe} failed: ${output}\n${error}")
         endif()
     else()
         if(result EQUAL 0)
