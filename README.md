@@ -94,11 +94,12 @@ owns accounting precision, minor-unit and rounding rules.
 
 Use CMake 3.21 or newer and a C++17 compiler.
 
-Direct dependencies are pinned submodules; see [the dependency registry](docs/dependencies.md).
-Use their recorded commits, never `git submodule update --remote`:
+Dependencies are pinned; see [the dependency registry](docs/dependencies.md).
+Core needs only the Time Shield submodule. Use its recorded commit, never
+`git submodule update --remote`:
 
 ```sh
-git submodule update --init
+git submodule update --init external/time-shield-cpp
 cmake -S . -B build-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_BUILD_EXAMPLES=ON
 cmake --build build-mingw
 ctest --test-dir build-mingw -C Release --output-on-failure
@@ -123,7 +124,7 @@ Optional features remain explicit:
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `RATEWEAVER_DEPENDENCY_MODE` | `BUNDLED` standalone; `EXISTING` embedded | Pinned submodules or host targets/packages |
-| `RATEWEAVER_CURL_MODE` | `AUTO` | Existing/system CURL, or pinned bundled fallback |
+| `RATEWEAVER_CURL_MODE` | `AUTO` | Host/system CURL, then pinned MinGW binary or source fallback; explicit `SYSTEM`, `PREBUILT`, `SOURCE` modes |
 | `RATEWEAVER_BUILD_TESTS` | On standalone; off embedded | Release-active offline and package/consumer regressions |
 | `RATEWEAVER_BUILD_EXAMPLES` | Off | Conversion and, when enabled, provider-refresh example |
 | `RATEWEAVER_BUILD_PROVIDERS` | Off | CDN/CBR JSON adapters; `rateweaver::providers` |
@@ -133,6 +134,22 @@ Optional features remain explicit:
 | `RATEWEAVER_INSTALL` | On | Headers and exported CMake package |
 
 Enable JSON, ECB and kurlyk options for the complete provider configuration.
+For MinGW x64, initialize `external/kurlyk`, `external/json` and
+`external/pugixml`, and select `RATEWEAVER_CURL_MODE=PREBUILT` to use the pinned
+curl 8.22.0 DLL without initializing or compiling `external/curl`. `AUTO`
+prefers a compatible host target or installed curl before that fallback.
+`SOURCE` explicitly uses the curl source submodule; the old curl mode
+`BUNDLED` is a deprecated alias for `SOURCE`. This is separate from
+`RATEWEAVER_DEPENDENCY_MODE=BUNDLED`.
+
+The prebuilt package uses LibreSSL and has known upstream advisories; see
+[version and security limits](docs/dependencies.md#curl-version-and-security-limit).
+With kurlyk v1.1.1, configure a trusted CA file through `HttpClient::set_ca_file()`
+or deploy `curl-ca-bundle.crt` beside the executable. The pinned package does
+not include that file. Installed consumers can call
+`rateweaver_copy_runtime_dlls(my_app)` to copy imported runtime DLLs beside
+their executable; hosts retain deployment ownership.
+
 The [persistent-client example](examples/provider_refresh.cpp) submits repeated
 async updates through one client. The separate [live smoke](examples/live_providers.cpp)
 reports provider availability and provenance; mandatory tests use loopback HTTP

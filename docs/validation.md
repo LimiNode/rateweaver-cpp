@@ -1,11 +1,77 @@
 # Standalone foundation validation
 
-Validation date: 2026-11-20. This corrective pass follows
-`28b2f8d7fd5fdf2b42677bd1e64f0476ec6f6162` in Draft PR #1. The PR records the
-published corrective HEAD and CI runs at that exact revision. These results
-supersede the earlier dependency audit.
+Validation date: 2026-11-21. The libcurl dependency correction follows reviewed
+HEAD `478e22fee1e1de212efd2ea273c5171b26dd07d5` in Draft PR #1. The PR records
+the published corrective HEAD and CI runs at that exact revision.
 
-## Toolchains and package checks
+## Curl resolution and DLL deployment correction
+
+The correction preserves the Core, graph, policy, routing, parser and refresh
+contracts. `CURL::libcurl` supplied by a host wins in all modes. `AUTO` then
+tries an installed package before the pinned MinGW x64 binary fallback, or the
+source fallback on MSVC/Linux. Explicit modes are `SYSTEM`, `PREBUILT` and
+`SOURCE`; `BUNDLED` remains a deprecated curl-mode alias for `SOURCE`.
+The [dependency registry](dependencies.md) records the platform matrix, immutable
+pins, provenance and the older binary's known security limitation.
+
+Observed local full C++17 runs for this correction:
+
+| Toolchain and curl provider | Release full CTest | Debug full CTest |
+| --- | --- | --- |
+| MinGW GCC 15.2, `PREBUILT` | 12/12, 66.07 s | 12/12, 139.26 s |
+| MinGW GCC 15.2, `SOURCE` | 12/12, 107.84 s | Not run locally; required CI profile |
+| MSVC 19.44, `SOURCE` | 12/12, 97.99 s | 12/12, 69.65 s |
+| Linux GCC 15.2, `SOURCE` | 12/12, 241.55 s | 12/12, 308.81 s |
+
+The standalone Core-only Debug profile passed 6/6 in 20.16 s, including the
+resolver guard/reuse probes and independent installed Core consumer. Mandatory
+CI has twelve jobs: Debug/Release Core on Linux/MSVC, full native SOURCE on
+Linux/MSVC, and full native PREBUILT and SOURCE on MinGW. PREBUILT jobs do not
+initialize `external/curl`; they assert the resolved provider, exact binary
+checkout SHA, absence of source curl configuration and matching adjacent DLLs.
+
+The full suite adds `rateweaver_curl_resolution` and
+`rateweaver_curl_runtime_tests` to the earlier ten-test configuration. Live
+public endpoints remain opt-in and outside mandatory CI. Offline configurations
+run eleven tests. The runtime test exercises local HTTPS success, rejection of
+an untrusted certificate, and hostname mismatch rejection; the prebuilt path
+also checks curl 8.22.0 headers against the loaded runtime, LibreSSL/4.3.2 and
+the actual adjacent DLL path. It runs with Windows PATH restricted to System32
+and a statically linked test compiler runtime, so a PATH copy cannot hide a
+missing curl DLL.
+
+The installed optional consumer similarly runs with a restricted Windows PATH
+after moving dependencies and RateWeaver to separate prefixes. It proves DLL
+deployment and native lifecycle, rather than public HTTPS trust. Resolver
+regressions cover host reuse in every mode, absent `SYSTEM` dependencies and
+unsupported `PREBUILT` platforms. Separate configuration checks confirm real
+`AUTO` binary acquisition with system discovery disabled, `SYSTEM` discovery
+after prefix relocation, rejection of the installed binary package on an
+unsupported platform, and deprecated `BUNDLED` cache migration to `SOURCE`.
+Existing native/manual HTTP, ETag/304,
+persistent-client, headers, multi-TU, embedded and installed Core checks remain.
+
+Binary inspection confirmed x86-64 DLL/import objects, matching 8.22.0 headers,
+Windows system/UCRT imports and no separate OpenSSL/LibreSSL DLL requirement.
+All fifteen package development files match the original curl-for-win archive.
+Direct curl probes under restricted PATH returned HTTPS 200 from curl.se and
+cbr.ru using Windows native ROOT/CA trust stores. That probe does not establish
+kurlyk's default CA handling: kurlyk v1.1.1 sets a CA file even when the client's
+setting is empty, and the pinned package omits its expected adjacent bundle.
+The full prebuilt live run therefore supplies `RATEWEAVER_LIVE_CA_FILE`.
+See [deployment and trust](integration.md#shared-curl-deployment-and-tls-trust).
+
+No newer verified LimiNode binary was substituted. Curl 8.22.0 has twenty-one
+published upstream advisories fixed in 8.23.0; the registry records that limit
+and recommends a separately verified package update.
+
+## Previous corrective-pass evidence
+
+The following results belong to reviewed HEAD `478e22f`, whose MinGW HTTP
+profile compiled curl from source. They remain historical evidence for the
+unchanged runtime paths; they are not a validation of the new binary fallback.
+
+### Toolchains and package checks
 
 The full C++17 configuration enables JSON, XML, native HTTP, examples and the
 opt-in live smoke. Debug and Release use active checks, independent of NDEBUG.
@@ -65,9 +131,9 @@ CURL and Threads. It does not replace upstream's full `kurlyk::kurlyk` target
 or configure unused WebSocket dependencies.
 
 ```sh
-git submodule update --init
+git submodule update --init external/time-shield-cpp external/kurlyk external/json external/pugixml
 cmake -S . -B tmp/agent-work/release -DCMAKE_BUILD_TYPE=Release \
-  -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=BUNDLED \
+  -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=PREBUILT \
   -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON \
   -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
 cmake --build tmp/agent-work/release
@@ -76,7 +142,9 @@ ctest --test-dir tmp/agent-work/release -C Release --output-on-failure
 
 Windows routine validation adds `-G "MinGW Makefiles"`; the MSVC profile uses
 `-G "Visual Studio 17 2022" -A x64` and `--config Debug` or `Release`.
-Linux uses Unix Makefiles and system OpenSSL development packages. Windows
+For MSVC/Linux source validation, also initialize `external/curl` and select
+`RATEWEAVER_CURL_MODE=SOURCE`. Linux uses Unix Makefiles and system OpenSSL
+development packages. Windows
 source-built curl uses Schannel. The pinned `curl-8_23_0` source header reports
 `8.23.0-DEV`; this is the upstream string at the documented gitlink, not an
 alternative dependency revision. Vendor files are unchanged.
@@ -131,7 +199,8 @@ See the [kurlyk audit and separate upstream proposal](kurlyk-limitations.md).
 
 ## Sanitizers and live HTTPS
 
-ASan+UBSan passed 4/4 focused tests in 5.09 s; TSan passed 4/4 in 4.83 s,
+At reviewed HEAD `478e22f`, ASan+UBSan passed 4/4 focused tests in 5.09 s;
+TSan passed 4/4 in 4.83 s,
 with no findings. Both runs cover Core, full parser fixtures, native HTTP and
 manual processing, with leak detection/halt-on-error where applicable.
 Instrumentation uses `-O1 -g -DNDEBUG`, frame pointers and sanitizer flags for C

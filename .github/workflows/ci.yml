@@ -45,17 +45,20 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev python3
       - name: Configure pinned dependencies and native HTTP
-        run: cmake -S . -B tmp/agent-work/ci -G "${{ matrix.generator }}" -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=BUNDLED -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
+        run: cmake -S . -B tmp/agent-work/ci -G "${{ matrix.generator }}" -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=SOURCE -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
       - name: Build public headers, tests and examples
         run: cmake --build tmp/agent-work/ci --config ${{ matrix.configuration }} --parallel 2
       - name: Test native HTTP and independent consumers
         run: ctest --test-dir tmp/agent-work/ci -C ${{ matrix.configuration }} --output-on-failure
+      - name: Check whitespace
+        run: git diff --check
 
   mingw:
     strategy:
       fail-fast: false
       matrix:
         configuration: [Debug, Release]
+        curl_mode: [PREBUILT, SOURCE]
     runs-on: windows-latest
     defaults:
       run:
@@ -63,15 +66,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: true
+          submodules: false
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
           install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-python
+      - name: Initialize required pinned submodules
+        run: |
+          git submodule update --init --depth 1 -- external/time-shield-cpp external/kurlyk external/json external/pugixml
+          if [ "${{ matrix.curl_mode }}" = "SOURCE" ]; then
+            git submodule update --init --depth 1 -- external/curl
+          fi
       - name: Configure pinned dependencies and native HTTP
-        run: cmake -S . -B tmp/agent-work/ci -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=BUNDLED -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
+        run: cmake -S . -B tmp/agent-work/ci -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=${{ matrix.configuration }} -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=${{ matrix.curl_mode }} -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
+      - name: Assert the requested curl provider
+        run: |
+          tr -d '\r' < tmp/agent-work/ci/CMakeCache.txt | grep -Fx 'RATEWEAVER_CURL_PROVIDER:INTERNAL=${{ matrix.curl_mode }}'
+          if [ "${{ matrix.curl_mode }}" = "PREBUILT" ]; then
+            test ! -e external/curl/CMakeLists.txt
+            test ! -d tmp/agent-work/ci/_deps/curl
+            test "$(git -C tmp/agent-work/ci/_deps/rw_curl-src rev-parse HEAD)" = 5a639c3fbe1c322a9048f4d54f66ba48f48a2d7d
+          fi
       - name: Build public headers, tests and examples
         run: cmake --build tmp/agent-work/ci --config ${{ matrix.configuration }} --parallel 2
+      - name: Verify adjacent prebuilt DLL deployment
+        if: matrix.curl_mode == 'PREBUILT'
+        run: |
+          cmp tmp/agent-work/ci/_deps/rw_curl-src/bin/libcurl-x64.dll tmp/agent-work/ci/tests/libcurl-x64.dll
+          cmp tmp/agent-work/ci/_deps/rw_curl-src/bin/libcurl-x64.dll tmp/agent-work/ci/libcurl-x64.dll
       - name: Test native HTTP and independent consumers
         run: ctest --test-dir tmp/agent-work/ci -C ${{ matrix.configuration }} --output-on-failure
+      - name: Check whitespace
+        run: git diff --check

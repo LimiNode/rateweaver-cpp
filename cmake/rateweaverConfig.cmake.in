@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+include("${CMAKE_CURRENT_LIST_DIR}/rateweaverRuntime.cmake")
 find_dependency(Threads)
 if(NOT TARGET time_shield::time_shield)
     find_dependency(TimeShield 2.0 CONFIG)

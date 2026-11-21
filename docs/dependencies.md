@@ -1,8 +1,8 @@
 # Dependency registry and build ownership
 
-Direct dependencies are Git submodules pinned to published releases. Run
-`git submodule update --init` at the recorded superproject commit. Do not use
-`--remote`; the gitlinks, not a dependency's default branch, are authoritative.
+Source dependencies are Git submodules pinned to published releases. Initialize
+only those required by the chosen features at the recorded superproject commit.
+Do not use `--remote`; the gitlinks, not a dependency's default branch, are authoritative.
 The HTTP-only standalone profile does not require recursively initializing
 kurlyk's optional WebSocket/test submodules.
 
@@ -12,7 +12,7 @@ kurlyk's optional WebSocket/test submodules.
 | `external/kurlyk` | v1.1.1 | `b62cd53f672c47b74bb14d762ea9dc59a9df19ce` | Optional native async refresh |
 | `external/json` | v3.12.0 | `55f93686c01528224f448c19128836e7df245f72` | Optional CDN/CBR JSON parsers |
 | `external/pugixml` | v1.16 | `c8033ce9d039e7f9d134877c363397b3cfe20816` | Optional ECB XML parser |
-| `external/curl` | curl-8_23_0 | `3163ec065643ba20709f190111f42c3e1fe95273` | Optional libcurl source fallback for HTTP-only kurlyk |
+| `external/curl` | curl-8_23_0 | `3163ec065643ba20709f190111f42c3e1fe95273` | Optional `SOURCE` libcurl build; not needed for MinGW `PREBUILT` |
 
 The pinned curl release tag's source header reports `8.23.0-DEV`. Validation
 records that observed version string alongside the exact gitlink; it does not
@@ -31,19 +31,72 @@ targets take precedence even in this mode. Configure all provider examples and
 offline tests with:
 
 ```sh
-git submodule update --init
-cmake -S . -B build-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
+git submodule update --init external/time-shield-cpp external/kurlyk external/json external/pugixml
+cmake -S . -B build-mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DRATEWEAVER_DEPENDENCY_MODE=BUNDLED -DRATEWEAVER_CURL_MODE=PREBUILT -DRATEWEAVER_BUILD_EXAMPLES=ON -DRATEWEAVER_BUILD_PROVIDERS=ON -DRATEWEAVER_ENABLE_ECB=ON -DRATEWEAVER_ENABLE_KURLYK=ON
 cmake --build build-mingw
 ctest --test-dir build-mingw -C Release --output-on-failure
 ```
 
-The default `RATEWEAVER_CURL_MODE=AUTO` first accepts `CURL::libcurl` or a system
-CURL package, then uses the pinned curl source if needed. `SYSTEM` requires a
-provided/system CURL target. `BUNDLED` selects the pinned fallback unless a target
-already exists. Windows fallback builds static HTTP/HTTPS-only libcurl using
-Schannel, without an OpenSSL, Asio or WebSocket download. Linux fallback requires
-the system OpenSSL development package and normal C/C++ build tools. Python 3 is
-needed only for local HTTP integration tests.
+### CURL resolution modes
+
+An existing `CURL::libcurl` always takes precedence in every mode, including
+`PREBUILT` and `SOURCE`. RateWeaver then neither downloads nor configures curl.
+Without that host target, `RATEWEAVER_CURL_MODE` selects:
+
+| Mode | Windows MinGW x64 | MSVC and Linux |
+| --- | --- | --- |
+| `AUTO` | Installed package, then pinned shared binary | Installed package, then pinned source build |
+| `SYSTEM` | Installed package only; error if absent | Installed package only; error if absent |
+| `PREBUILT` | Pinned shared binary; skips system discovery | Clear unsupported-platform error |
+| `SOURCE` | Explicit pinned static build with Schannel | Explicit pinned source build; Schannel on MSVC, system OpenSSL on Linux |
+
+The source build requires initialized `external/curl`; MinGW `PREBUILT` and
+its `AUTO` binary fallback do not. Other unsupported prebuilt architectures
+also fail configuration. `BUNDLED` is a deprecated alias for curl mode `SOURCE`,
+not a synonym for the independently named dependency mode `BUNDLED`.
+Windows system discovery requires curl 8.11.0 or newer. MSVC never receives the
+MinGW `.dll.a` fallback. Python 3 is needed only for local integration tests.
+
+### Pinned MinGW binary
+
+The binary comes from
+[`LimiNode/curl-8.22.0_1-win64-mingw`](https://github.com/LimiNode/curl-8.22.0_1-win64-mingw)
+at `5a639c3fbe1c322a9048f4d54f66ba48f48a2d7d`, the same immutable pin used
+by kurlyk v1.1.1. It supplies curl 8.22.0 headers, `lib/libcurl.dll.a` and
+`bin/libcurl-x64.dll`. FetchContent downloads it only when selected; an offline
+build can supply its checkout through `FETCHCONTENT_SOURCE_DIR_RW_CURL`.
+
+The original curl-for-win archive is
+[`curl-8.22.0_1-win64-mingw.zip`](https://curl.se/windows/dl-8.22.0_1/curl-8.22.0_1-win64-mingw.zip),
+SHA-256 `7f23b039f6ea4197362d4468e1a0e71428201222e1bef3b680d5ef7b2aefb714`.
+The pinned DLL, import library, license and twelve headers match that archive
+byte for byte. DLL SHA-256 is
+`10c8871b2188095c26b28767b4f99dc97d0f6fab58a70be47f6679cd9126b13f`.
+
+Both DLL and import objects are x86-64. Runtime reports `LibreSSL/4.3.2`,
+not Schannel. The DLL imports Windows system libraries and UCRT API sets;
+its third-party libraries are linked internally. This does not establish
+support for obsolete Windows versions or arbitrary cross-CRT object exchange.
+The runtime regression checks matching header/binary versions, the actual
+adjacent loaded DLL, TLS success and certificate/hostname rejection.
+
+### Curl version and security limit
+
+The binary pin deliberately remains 8.22.0; it is not interchangeable with the
+8.23.0 source pin or its headers. As of 2026-11-21,
+[upstream lists 21 advisories for 8.22.0](https://curl.se/docs/vuln-8.22.0.html)
+(one High, twenty Low), fixed in 8.23.0. High
+[CVE-2026-92392](https://curl.se/docs/CVE-2026-92392.html) concerns an HTTP/2
+upload use-after-free. Built-in feeds use GET requests, but that does not make
+the package generally free of vulnerabilities or establish that every advisory
+is reachable through RateWeaver.
+
+These fixes justify refreshing the shared binary package. A verified newer
+LimiNode binary package was not available during this pass, so the specified
+provenance-checked pin is retained with this explicit limitation rather than
+substituting an unreviewed DLL. Select an appropriate installed curl or the
+pinned `SOURCE` build when the older binary is unsuitable. A separately
+verified binary update remains recommended.
 
 The standalone dependency shim is explicitly named
 `RateWeaverKurlykHttp::client`: native kurlyk headers plus CURL/Threads and

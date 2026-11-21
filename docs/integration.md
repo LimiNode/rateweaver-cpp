@@ -28,6 +28,49 @@ Install RateWeaver and dependencies into separate prefixes; supply their
 prefixes through `CMAKE_PREFIX_PATH`. Installed consumers need no RateWeaver
 source checkout. Omit optional components for offline Core use.
 
+For MinGW x64, `RATEWEAVER_CURL_MODE=AUTO` tries an installed curl before
+the pinned prebuilt fallback. `PREBUILT` selects that binary directly; `SOURCE`
+selects the source submodule. An existing `CURL::libcurl` wins in every mode.
+Hosts supplying `kurlyk::kurlyk` also retain its feature definitions and
+dependency graph. RateWeaver does not fetch a second curl, change client
+timeouts/retries/limits, or copy/install host-owned curl artifacts.
+
+### Shared curl deployment and TLS trust
+
+The MinGW binary fallback uses `libcurl-x64.dll` and its matching import
+library and headers. Standalone RateWeaver HTTP tests and examples copy the
+imported runtime DLL beside their executables automatically. Consumers own
+their executable directory and opt in to the exported CMake helper:
+
+```cmake
+find_package(rateweaver CONFIG REQUIRED COMPONENTS kurlyk)
+add_executable(my_application main.cpp)
+target_link_libraries(my_application PRIVATE rateweaver::kurlyk)
+rateweaver_copy_runtime_dlls(my_application)
+```
+
+The helper uses CMake's `TARGET_RUNTIME_DLLS`; on non-Windows platforms it does
+nothing. It copies DLLs described by imported shared targets, not arbitrary
+toolchain runtime dependencies. The host still owns its compiler runtime
+deployment and final application installation. Embedded builds do not
+automatically deploy host dependencies.
+
+Installing the owned prebuilt dependency includes its DLL, import library,
+headers, licenses and a relocatable `CURLConfig.cmake`. The `RateWeaver`
+component contains only RateWeaver; `RateWeaverDependencies` contains the owned
+HTTP shim and prebuilt curl. Separate relocated prefixes work through
+`CMAKE_PREFIX_PATH`, without build-machine DLL paths in the installed package.
+
+The prebuilt backend is LibreSSL. Direct curl probes used native Windows
+ROOT/CA trust stores successfully, but kurlyk v1.1.1 always sets `CURLOPT_CAINFO`
+to the client's configured CA file or to adjacent `curl-ca-bundle.crt` when the
+setting is empty. The pinned package omits that bundle. For kurlyk HTTPS,
+configure a trusted bundle with `HttpClient::set_ca_file()` or deploy
+`curl-ca-bundle.crt` beside the executable; direct curl's native-store success
+does not establish kurlyk's default HTTPS trust. RateWeaver does not disable
+certificate verification or change the host's client settings. For the opt-in
+live example, set `RATEWEAVER_LIVE_CA_FILE=/path/to/cacert.pem`.
+
 ## Host lifecycle
 
 The host owns one process-wide kurlyk runtime and one persistent, dedicated

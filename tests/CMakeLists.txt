@@ -14,6 +14,31 @@ endfunction()
 rateweaver_test(rateweaver_core_tests core_tests.cpp)
 rateweaver_test(rateweaver_odr_test "odr_main.cpp;odr_peer.cpp")
 
+add_test(NAME rateweaver_curl_resolution
+    COMMAND ${CMAKE_COMMAND} "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}"
+        "-DBUILD_DIR=${PROJECT_BINARY_DIR}" "-DGENERATOR=${CMAKE_GENERATOR}"
+        "-DGENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+        "-DCXX_COMPILER=${CMAKE_CXX_COMPILER}" -P "${CMAKE_CURRENT_SOURCE_DIR}/curl_resolution.cmake")
+set_tests_properties(rateweaver_curl_resolution PROPERTIES TIMEOUT 90)
+
+if(RATEWEAVER_ENABLE_KURLYK)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_executable(rateweaver_curl_runtime_tests curl_runtime_tests.cpp)
+    target_link_libraries(rateweaver_curl_runtime_tests PRIVATE rateweaver::kurlyk)
+    set_target_properties(rateweaver_curl_runtime_tests PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+    if(MINGW)
+        # Isolate curl deployment from the compiler's own runtime DLL search.
+        target_link_options(rateweaver_curl_runtime_tests PRIVATE -static)
+    endif()
+    if(RATEWEAVER_CURL_PROVIDER STREQUAL "PREBUILT")
+        target_compile_definitions(rateweaver_curl_runtime_tests PRIVATE RATEWEAVER_TEST_PREBUILT_CURL=1)
+    endif()
+    add_test(NAME rateweaver_curl_runtime_tests COMMAND Python3::Interpreter
+        "${CMAKE_CURRENT_SOURCE_DIR}/https_server.py" --exe $<TARGET_FILE:rateweaver_curl_runtime_tests>)
+    set_tests_properties(rateweaver_curl_runtime_tests PROPERTIES TIMEOUT 40)
+endif()
+
 add_test(NAME rateweaver_superproject
     COMMAND ${CMAKE_COMMAND}
         "-DSOURCE_DIR=${PROJECT_SOURCE_DIR}" "-DBUILD_DIR=${PROJECT_BINARY_DIR}"
@@ -149,3 +174,11 @@ endforeach()
 file(WRITE "${PROJECT_BINARY_DIR}/dependency-test-config.cmake"
     "set(DEPENDENCY_BUILD_DIRS [==[${dependency_build_dirs}]==])\n"
     "set(DEPENDENCY_PREFIX_PATH [==[${CMAKE_PREFIX_PATH}]==])\n")
+
+if(RATEWEAVER_IS_TOP_LEVEL AND RATEWEAVER_ENABLE_KURLYK)
+    foreach(executable rateweaver_kurlyk_http_tests rateweaver_curl_runtime_tests)
+        if(TARGET ${executable})
+            rateweaver_copy_runtime_dlls(${executable})
+        endif()
+    endforeach()
+endif()

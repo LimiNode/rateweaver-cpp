@@ -25,6 +25,11 @@ if(CONSUME_KURLYK)
     target_link_libraries(consumer PRIVATE rateweaver::kurlyk)
     target_compile_definitions(consumer PRIVATE CONSUME_KURLYK=1
         KURLYK_AUTO_INIT=0 KURLYK_WEBSOCKET_SUPPORT=0 KURLYK_AUTH_SUPPORT=0 KURLYK_OAUTH_SUPPORT=0)
+    rateweaver_copy_runtime_dlls(consumer)
+endif()
+if(MINGW)
+    target_link_options(consumer PRIVATE -static)
 endif()
 enable_testing()
-add_test(NAME consumer COMMAND consumer)
+add_test(NAME consumer COMMAND ${CMAKE_COMMAND} "-DEXECUTABLE=$<TARGET_FILE:consumer>"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/clean_runtime.cmake")
