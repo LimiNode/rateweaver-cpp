@@ -93,8 +93,8 @@ jobs:
       - name: Verify adjacent prebuilt DLL deployment
         if: matrix.curl_mode == 'PREBUILT'
         run: |
-          cmp tmp/agent-work/ci/_deps/rw_curl-src/bin/libcurl-x64.dll tmp/agent-work/ci/tests/libcurl-x64.dll
-          cmp tmp/agent-work/ci/_deps/rw_curl-src/bin/libcurl-x64.dll tmp/agent-work/ci/libcurl-x64.dll
+          cmake -E compare_files tmp/agent-work/ci/_deps/rw_curl-src/bin/libcurl-x64.dll tmp/agent-work/ci/tests/libcurl-x64.dll
+          cmake -E compare_files tmp/agent-work/ci/_deps/rw_curl-src/bin/libcurl-x64.dll tmp/agent-work/ci/libcurl-x64.dll
       - name: Test native HTTP and independent consumers
         run: ctest --test-dir tmp/agent-work/ci -C ${{ matrix.configuration }} --output-on-failure
       - name: Check whitespace
