@@ -71,7 +71,7 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-python
+          install: git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-make mingw-w64-x86_64-python
       - name: Initialize required pinned submodules
         run: |
           git submodule update --init --depth 1 -- external/time-shield-cpp external/kurlyk external/json external/pugixml
