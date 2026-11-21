@@ -98,4 +98,5 @@ jobs:
       - name: Test native HTTP and independent consumers
         run: ctest --test-dir tmp/agent-work/ci -C ${{ matrix.configuration }} --output-on-failure
       - name: Check whitespace
-        run: git diff --check
+        # Match the Windows checkout normalization in MSYS2's separate Git environment.
+        run: git -c core.autocrlf=true diff --check
